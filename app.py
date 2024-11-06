@@ -2,52 +2,75 @@ import secrets
 from flask import Flask, request, jsonify
 import PyKCS11
 from cryptography.hazmat.primitives.hashes import Hash, SHA256
+from cryptography import x509
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import serialization
 from PyQt5 import QtWidgets
 import sys
 from multiprocessing import Pipe, Process
 
 app = Flask(__name__)
-
-# Path to PKCS#11 library
+ 
 PKCS11_LIB_PATH = "token_drivers\\windows\\eps2003csp11v264.dll"
 
-def fetch_dsc_certificate(session):
-    """
-    Fetch the DSC certificate from the token.
-    """
+def fetch_certificate_publicKey_ownerName(session):
     certs = session.findObjects([(PyKCS11.CKA_CLASS, PyKCS11.CKO_CERTIFICATE)])
     if not certs:
         raise ValueError("No certificate found on the DSC token")
+    
     cert_der = bytes(session.getAttributeValue(certs[0], [PyKCS11.CKA_VALUE], True)[0])
-    return cert_der
+    
+    certificate = x509.load_der_x509_certificate(cert_der, default_backend())
+    
+    public_key = certificate.public_key()
+    public_key_der = public_key.public_bytes(encoding=serialization.Encoding.DER, format=serialization.PublicFormat.SubjectPublicKeyInfo) 
+
+    owner_name = certificate.subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME)[0].value
+
+    return cert_der, public_key_der, owner_name
 
 def prompt_for_pin_in_process(conn):
-    """
-    Run the PyQt5 PIN prompt in a separate process.
-    Communicates the entered PIN back to the main process via a Pipe connection.
-    """
     app = QtWidgets.QApplication(sys.argv)
     pin, ok = QtWidgets.QInputDialog.getText(None, "PIN Entry", "Please enter your PIN:", QtWidgets.QLineEdit.Password)
-    
-    if ok and pin.strip():  # Check if the dialog was accepted and PIN is non-empty
-        conn.send(pin.strip())  # Send the trimmed PIN back to the main process
+    if ok and pin.strip():
+        conn.send(pin.strip())
     else:
-        conn.send(None)  # Send None if canceled or invalid PIN
-
-    conn.close()  # Close the connection
-    app.quit()  # Properly quit the QApplication instance
+        conn.send(None)
+    conn.close()
+    app.quit()
+    sys.exit(0)  
 
 def prompt_for_pin():
-    """
-    Starts a separate process to prompt for a PIN using PyQt5.
-    Returns the PIN if valid, or None if the PIN is empty, only spaces, or canceled.
-    """
-    parent_conn, child_conn = Pipe()  # Create a pipe for inter-process communication
+    parent_conn, child_conn = Pipe()
     p = Process(target=prompt_for_pin_in_process, args=(child_conn,))
     p.start()
-    p.join()  # Wait for the process to finish
+    p.join()
+    return parent_conn.recv()
 
-    return parent_conn.recv()  # Receive the PIN from the child process
+@app.route('/list-tokens', methods=['GET'])
+def list_tokens():
+    pkcs11 = PyKCS11.PyKCS11Lib()
+    try:
+        pkcs11.load(PKCS11_LIB_PATH)
+    except Exception as e:
+        return jsonify({"error": "Failed to load PKCS#11 library. Please check the library path."}), 500
+
+    slots = pkcs11.getSlotList(tokenPresent=True)
+    if not slots:
+        return jsonify({"error": "No tokens available"}), 404
+    
+    session=None
+    try:
+        session = pkcs11.openSession(slots[0])
+
+        cert_der, public_key, owner_name=fetch_certificate_publicKey_ownerName(session)
+
+        return jsonify({"certficate":cert_der.hex(), "public_key":public_key.hex(), "owner_name":owner_name})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if session:
+            session.closeSession()
 
 @app.route('/sign', methods=['POST'])
 def sign_hash():
@@ -60,49 +83,46 @@ def sign_hash():
     except ValueError:
         return jsonify({"error": "Invalid hash format"}), 400
 
-    # Prompt for PIN
-    pin = prompt_for_pin()
-    if not pin:
-        return jsonify({"error": "Invalid PIN provided"}), 400
-
-    # Initialize PKCS#11 and sign the hash
     pkcs11 = PyKCS11.PyKCS11Lib()
-    pkcs11.load(PKCS11_LIB_PATH)
+    try:
+        pkcs11.load(PKCS11_LIB_PATH)
+    except Exception as e:
+        return jsonify({"error": "Failed to load PKCS#11 library. Please check the library path."}), 500
+
     slots = pkcs11.getSlotList(tokenPresent=True)
     if not slots:
         return jsonify({"error": "No tokens available"}), 404
 
+    pin = prompt_for_pin()
+    if not pin:
+        return jsonify({"error": "Invalid PIN provided"}), 400
+    
     session = None
+    logged_in = True
     try:
         session = pkcs11.openSession(slots[0])
 
-        # Attempt to log in with the provided PIN
         try:
             session.login(pin)
         except PyKCS11.PyKCS11Error:
+            logged_in = False
             return jsonify({"error": "Invalid PIN"}), 403
 
-        # Fetch the certificate (useful for verification if needed)
-        certificate_der = fetch_dsc_certificate(session)
-
-        # Locate the private key object on the token
         priv_keys = session.findObjects([(PyKCS11.CKA_CLASS, PyKCS11.CKO_PRIVATE_KEY)])
         if not priv_keys:
             raise ValueError("No private key found on the DSC token")
         priv_key = priv_keys[0]
 
-        # Sign the provided hash using the private key on the token
         signature = bytes(session.sign(priv_key, hash_bytes, PyKCS11.Mechanism(PyKCS11.CKM_SHA256_RSA_PKCS)))
 
-        return jsonify({"signature": signature.hex(), "certificate": certificate_der.hex()})
+        return jsonify({"signature": signature.hex()})
 
-    except PyKCS11.PyKCS11Error as e:
-        return jsonify({"error": f"PKCS#11 error: {e}"}), 500
     except Exception as e:
         return jsonify({"error": str(e)}), 500
     finally:
         if session:
-            session.logout()
+            if logged_in:
+                session.logout()
             session.closeSession()
 
 if __name__ == '__main__':
