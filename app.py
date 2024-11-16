@@ -10,6 +10,7 @@ import sys
 from multiprocessing import Pipe, Process
 from datetime import datetime, timezone
 import requests
+import base64
 
 app = Flask(__name__)
  
@@ -54,7 +55,7 @@ def get_internet_time():
         response = requests.get("https://timeapi.io/api/Time/current/zone?timeZone=UTC")
         response.raise_for_status()  
         data = response.json()
-        return data["dateTime"]  
+        return str(data["dateTime"])  
     except Exception as e:
         print(f"Error fetching internet time: {e}")
         return None
@@ -84,7 +85,7 @@ def list_tokens():
         if session:
             session.closeSession()
 
-@app.route('/register_token', methods=['POST'])
+@app.route('/register-token', methods=['POST'])
 def register_token():
     client_cert_hex = request.json.get("certificate")
     nonce = request.json.get("nonce")
@@ -129,16 +130,14 @@ def register_token():
         if not timestamp:
             timestamp = datetime.now(timezone.utc).isoformat() 
         
-        combined_data = nonce + owner_name + timestamp
-        
-        hash_value = sha256(combined_data.encode()).digest() 
+        combined_data = (nonce + owner_name + timestamp).encode('utf-8')
        
         priv_keys = session.findObjects([(PyKCS11.CKA_CLASS, PyKCS11.CKO_PRIVATE_KEY)])
         if not priv_keys:
             raise ValueError("No private key found on the DSC token")
         priv_key = priv_keys[0]
        
-        signature = bytes(session.sign(priv_key, hash_value, PyKCS11.Mechanism(PyKCS11.CKM_RSA_X_509, None)))
+        signature = bytes(session.sign(priv_key, combined_data, PyKCS11.Mechanism(PyKCS11.CKM_SHA256_RSA_PKCS)))
         
         return jsonify({"signature": signature.hex(), "timestamp": timestamp})
     except Exception as e:
@@ -149,8 +148,8 @@ def register_token():
                 session.logout()
             session.closeSession()
 
-@app.route('/single_sign', methods=['POST'])
-def single_sign():
+@app.route('/single-data-sign', methods=['POST'])
+def single_data_sign():
     hash_hex = request.json.get("hash")
     if not hash_hex:
         return jsonify({"error": "No hash provided"}), 400
@@ -159,6 +158,8 @@ def single_sign():
         hash_bytes = bytes.fromhex(hash_hex)
     except ValueError:
         return jsonify({"error": "Invalid hash format"}), 400
+
+    hash_base64 = base64.b64encode(hash_bytes).decode('utf-8')
 
     pkcs11 = PyKCS11.PyKCS11Lib()
     try:
@@ -190,11 +191,15 @@ def single_sign():
             raise ValueError("No private key found on the DSC token")
         priv_key = priv_keys[0]
 
-        signature = bytes(session.sign(priv_key, hash_bytes, PyKCS11.Mechanism(PyKCS11.CKM_RSA_X_509, None)))
-
         timestamp = get_internet_time()
         if not timestamp:
             timestamp = datetime.now(timezone.utc).isoformat()
+
+        data = (hash_base64+timestamp).encode('utf-8')
+
+        print(hash_base64+timestamp)
+
+        signature = bytes(session.sign(priv_key, data, PyKCS11.Mechanism(PyKCS11.CKM_SHA256_RSA_PKCS)))
         
         return jsonify({"signature": signature.hex(), "timestamp": timestamp})
 
