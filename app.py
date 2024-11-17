@@ -1,7 +1,5 @@
-import secrets
 from flask import Flask, request, jsonify
-import PyKCS11
-from hashlib import sha256
+import PyKCS11 
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
@@ -11,8 +9,10 @@ from multiprocessing import Pipe, Process
 from datetime import datetime, timezone
 import requests
 import base64
+from flask_cors import CORS
 
 app = Flask(__name__)
+CORS(app)
  
 PKCS11_LIB_PATH = "token_drivers\\windows\\eps2003csp11v264.dll"
 
@@ -30,7 +30,11 @@ def fetch_certificate_publicKey_ownerName(session):
 
     owner_name = certificate.subject.get_attributes_for_oid(x509.NameOID.COMMON_NAME)[0].value
 
-    return cert_der, public_key_der, owner_name
+    pub_key = session.findObjects([(PyKCS11.CKA_CLASS, PyKCS11.CKO_PUBLIC_KEY)])[0]
+
+    key_id = bytes(session.getAttributeValue(pub_key, [PyKCS11.CKA_ID], True)[0])
+
+    return cert_der, public_key_der, owner_name, key_id
 
 def prompt_for_pin_in_process(conn):
     app = QtWidgets.QApplication(sys.argv)
@@ -76,9 +80,9 @@ def list_tokens():
     try:
         session = pkcs11.openSession(slots[0])
 
-        cert_der, public_key, owner_name=fetch_certificate_publicKey_ownerName(session)
+        cert_der, public_key, owner_name, key_id = fetch_certificate_publicKey_ownerName(session)
         
-        return jsonify({"certficate":cert_der.hex(), "public_key":public_key.hex(), "owner_name":owner_name})
+        return jsonify({"certficate":cert_der.hex(), "public_key":public_key.hex(), "owner_name":owner_name, "key_id":key_id.hex()})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
     finally:
@@ -121,7 +125,7 @@ def register_token():
             logged_in = False
             return jsonify({"error": "Invalid PIN"}), 403
 
-        cert_der, public_key, owner_name = fetch_certificate_publicKey_ownerName(session)
+        cert_der, public_key, owner_name, key_id = fetch_certificate_publicKey_ownerName(session)
         
         if client_cert_hex != cert_der.hex():
             return jsonify({"error": "Certificate does not match token"}), 403
