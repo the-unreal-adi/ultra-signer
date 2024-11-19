@@ -64,7 +64,7 @@ def get_internet_time():
         print(f"Error fetching internet time: {e}")
         return None
 
-@app.route('/list-tokens', methods=['GET'])
+@app.route('/list-token', methods=['GET'])
 def list_tokens():
     pkcs11 = PyKCS11.PyKCS11Lib()
     try:
@@ -93,9 +93,10 @@ def list_tokens():
 def register_token():
     client_cert_hex = request.json.get("certificate")
     nonce = request.json.get("nonce")
+    client_key_id_hex = request.json.get("key_id")
     
     if not client_cert_hex or not nonce:
-        return jsonify({"error": "Certificate and nonce are required"}), 400
+        return jsonify({"error": "Certificate, key and nonce are required"}), 400
     
     try:
         x509.load_der_x509_certificate(bytes.fromhex(client_cert_hex), default_backend())
@@ -129,6 +130,9 @@ def register_token():
         
         if client_cert_hex != cert_der.hex():
             return jsonify({"error": "Certificate does not match token"}), 403
+
+        if client_key_id_hex != key_id.hex():
+            return jsonify({"error": "Certificate key id does not match token"}), 403
         
         timestamp = get_internet_time()
         if not timestamp:
@@ -143,7 +147,7 @@ def register_token():
        
         signature = bytes(session.sign(priv_key, combined_data, PyKCS11.Mechanism(PyKCS11.CKM_SHA256_RSA_PKCS)))
         
-        return jsonify({"signature": signature.hex(), "timestamp": timestamp})
+        return jsonify({"key_id":key_id.hex(), "signature": signature.hex(), "timestamp": timestamp})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
     finally:
