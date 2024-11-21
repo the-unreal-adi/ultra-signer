@@ -11,6 +11,7 @@ idna==3.10
 itsdangerous==2.2.0
 Jinja2==3.1.4
 MarkupSafe==3.0.2
+psutil==6.1.0
 pycparser==2.22
 PyKCS11==1.5.17
 PyQt5==5.15.11
