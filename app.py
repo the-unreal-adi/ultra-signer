@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, session
+from flask import Flask, request, jsonify
 from flask_cors import CORS
 import PyKCS11 
 from cryptography import x509
@@ -15,6 +15,9 @@ import psutil
 import platform
 import hashlib
 import secrets
+import sqlite3
+import getpass
+import binascii
 
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(16)
@@ -28,6 +31,7 @@ def get_mac_address():
     return mac
 
 def get_client_id():
+    print("Generating client id...")
     try:
         # Get CPU info (brand string or equivalent)
         cpu_info = platform.processor()
@@ -42,12 +46,16 @@ def get_client_id():
         if not disk_info:
             disk_info = "UnknownDisk"
 
+        mac_address = get_mac_address()
+
+        username = getpass.getuser()
+
         # Combine CPU, Disk information and MAC Address into a unique string
-        unique_string = f"CPU:{cpu_info}-DISK:{disk_info}--MAC:{get_mac_address()}"
+        unique_string = f"USER:{username}--CPU:{cpu_info}-DISK:{disk_info}--MAC:{mac_address}"
 
         # Generate a UUID based on the unique string
         machine_guid = uuid.uuid5(uuid.NAMESPACE_DNS, unique_string)
-        return str(machine_guid)
+        return str(machine_guid), username, cpu_info, disk_info, mac_address
     except Exception as e:
         return f"Error: {str(e)}"
 
@@ -72,6 +80,166 @@ def generate_base64_id(components):
     # Encode the hash in Base64
     id_base64 = base64.b64encode(hash_bytes).decode('utf-8')
     return id_base64
+
+def init_db():
+    connection = None
+    try:
+        # Connect to the database
+        connection = sqlite3.connect("signerData.db")
+        cursor = connection.cursor()
+
+        # Begin a transaction
+        connection.execute("BEGIN")
+
+        # Create the client_info table if it doesn't exist
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS client_info (
+                client_id TEXT PRIMARY KEY,
+                user_name TEXT NOT NULL,
+                cpu_info TEXT NOT NULL,
+                disk_info TEXT NOT NULL,
+                mac_address TEXT NOT NULL
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS registered_tokens (
+                reg_id TEXT PRIMARY KEY,
+                key_id TEXT NOT NULL,
+                owner_name TEXT NOT NULL,
+                nonce TEXT NOT NULL,
+                signature TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                is_verified TEXT NOT NULL
+            )
+        ''')
+
+        # Commit the transaction
+        connection.commit()
+    except sqlite3.Error as e:
+        # Roll back the transaction in case of an error
+        if connection:
+            connection.rollback()
+        print(f"Database error occurred: {e}")
+        raise
+    except Exception as e:
+        # Catch any other exceptions
+        if connection:
+            connection.rollback()
+        print(f"An error occurred: {e}")
+        raise
+    finally:
+        # Ensure the connection is closed
+        if connection:
+            connection.close()
+
+def init_client():
+    try:
+        # Connect to the database
+        connection = sqlite3.connect("signerData.db")
+        cursor = connection.cursor()
+
+        client_id =None
+
+        cursor.execute("SELECT client_id FROM client_info LIMIT 1")
+        result = cursor.fetchone()
+
+        if result:
+            client_id = str(result[0])
+        else:
+            client_id, user_name, cpu_info, disk_info, mac_address = get_client_id()
+
+            if not client_id:
+                print("Error fetching client id")
+                raise
+
+            # Begin a transaction
+            connection.execute("BEGIN")
+
+            cursor.execute('''
+                INSERT INTO client_info (client_id, user_name, cpu_info, disk_info, mac_address)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (client_id, user_name, cpu_info, disk_info, mac_address))
+
+            connection.commit()
+
+        app.client_id = client_id    
+    except sqlite3.Error as e:
+        if connection:
+            connection.rollback()
+        print(f"Database error occurred: {e}")
+        raise
+    except Exception as e:
+        if connection:
+            connection.rollback()
+        print(f"An error occurred: {e}")
+        raise
+    finally:
+        # Ensure the connection is closed
+        if connection:
+            connection.close()
+
+def store_registration_data(unique_id, key_id, owner_name, nonce, signature, timestamp):
+    """
+    Store the verified registration data in the 'registered_tokens' SQLite database table.
+    All fields except the ID are stored in Base64 format. The ID is derived from a hash of provided components.
+    """
+    try:
+        signature_base64 = base64.b64encode(binascii.unhexlify(signature)).decode('utf-8')
+        nonce_base64 = base64.b64encode(nonce.encode('utf-8')).decode('utf-8')
+        key_id_base64 = base64.b64encode(key_id.encode('utf-8')).decode('utf-8')
+
+        conn = sqlite3.connect('signerData.db')  # Connect to SQLite database
+        cursor = conn.cursor()
+
+        # Begin a transaction
+        conn.execute("BEGIN")
+
+        # Insert the verified registration data
+        cursor.execute('''
+            INSERT INTO registered_tokens (reg_id, key_id, owner_name, nonce, signature, timestamp, is_verified)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (unique_id, key_id_base64, owner_name, nonce_base64, signature_base64, timestamp, "N"))
+
+        conn.commit()  # Commit the transaction
+    except sqlite3.Error as e:
+        if conn:
+            conn.rollback()
+        print(f"Database error: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
+
+def update_registration_status(reg_id):
+    try:
+        conn = sqlite3.connect('signerData.db')  # Connect to SQLite database
+        cursor = conn.cursor()
+
+        conn.execute("BEGIN")
+
+        cursor.execute("""
+            UPDATE registered_tokens
+            SET is_verified = 'Y'
+            WHERE reg_id = ? AND is_verified = 'N'
+        """, (reg_id,))
+
+        # Commit the transaction to save changes
+        conn.commit()
+
+        # Check if any row was updated
+        if cursor.rowcount == 0:
+            print(f"No record found with reg_id = {reg_id}.")
+            raise
+
+    except sqlite3.Error as e:
+        if conn:
+            conn.rollback()
+        print(f"Database error: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
 
 def fetch_certificate_publicKey_ownerName(pkcsSession):
     certs = pkcsSession.findObjects([(PyKCS11.CKA_CLASS, PyKCS11.CKO_CERTIFICATE)])
@@ -206,6 +374,8 @@ def register_token():
 
         reg_id = generate_base64_id([app.client_id, key_id.hex()])
         
+        store_registration_data(reg_id, key_id.hex(), owner_name, nonce, signature.hex(), timestamp)
+
         return jsonify({"key_id":key_id.hex(), "signature": signature.hex(), "timestamp": timestamp, "client_mac": get_mac_address(), "client_id": app.client_id, "reg_id": reg_id})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -214,6 +384,18 @@ def register_token():
             if logged_in:
                 pkcsSession.logout()
             pkcsSession.closeSession()
+
+@app.route('/register-token', methods=['PATCH'])
+def verify_registration():
+    try:
+        reg_id = request.json.get("reg_id")
+
+        update_registration_status(reg_id)
+
+        return jsonify({"status": "success", "reg_id": reg_id})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 
 @app.route('/single-data-sign', methods=['POST'])
 def single_data_sign():
@@ -277,5 +459,6 @@ def single_data_sign():
             pkcsSession.closeSession()
 
 if __name__ == '__main__':
-    app.client_id = get_client_id()
+    init_db()
+    init_client()
     app.run(debug=True, host='127.0.0.1', port=8080)
