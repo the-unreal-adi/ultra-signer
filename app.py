@@ -241,6 +241,28 @@ def update_registration_status(reg_id):
         if conn:
             conn.close()
 
+def get_dsc_reg_id(key_id):
+    reg_id = None
+
+    try:
+        conn = sqlite3.connect('signerData.db')  # Connect to SQLite database
+        cursor = conn.cursor()
+
+        key_id_base64 = base64.b64encode(key_id.encode('utf-8')).decode('utf-8')
+
+        cursor.execute("SELECT reg_id FROM registered_tokens WHERE key_id = ?", (key_id_base64,))
+        result = cursor.fetchone()
+         
+        if result:
+            reg_id = str(result[0])
+    except sqlite3.Error as e:
+        print(f"Database error: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+    return reg_id
+
 def fetch_certificate_publicKey_ownerName(pkcsSession):
     certs = pkcsSession.findObjects([(PyKCS11.CKA_CLASS, PyKCS11.CKO_CERTIFICATE)])
     if not certs:
@@ -307,7 +329,9 @@ def list_tokens():
 
         cert_der, public_key, owner_name, key_id = fetch_certificate_publicKey_ownerName(pkcsSession)
         
-        return jsonify({"certficate":cert_der.hex(), "public_key":public_key.hex(), "owner_name":owner_name, "key_id":key_id.hex(), "client_id": app.client_id})
+        reg_id = get_dsc_reg_id(key_id.hex())
+
+        return jsonify({"certficate":cert_der.hex(), "public_key":public_key.hex(), "owner_name":owner_name, "key_id":key_id.hex(), "client_id": app.client_id, "reg_id": reg_id})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
     finally:
