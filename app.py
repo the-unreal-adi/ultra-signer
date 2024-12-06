@@ -18,12 +18,11 @@ import secrets
 import sqlite3
 import getpass
 import binascii
+import os
 
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(16)
 CORS(app)
- 
-PKCS11_LIB_PATH = "token_drivers\\windows\\eps2003csp11v264.dll"
 
 def get_mac_address():
     # Fetch the MAC address of the system
@@ -98,7 +97,8 @@ def init_db():
                 user_name TEXT NOT NULL,
                 cpu_info TEXT NOT NULL,
                 disk_info TEXT NOT NULL,
-                mac_address TEXT NOT NULL
+                mac_address TEXT NOT NULL,
+                recent_driver TEXT NOT NULL
             )
         ''')
 
@@ -139,13 +139,15 @@ def init_client():
         connection = sqlite3.connect("signerData.db")
         cursor = connection.cursor()
 
-        client_id =None
+        client_id = None
+        recent_driver = None
 
-        cursor.execute("SELECT client_id FROM client_info LIMIT 1")
+        cursor.execute("SELECT client_id, recent_driver FROM client_info LIMIT 1")
         result = cursor.fetchone()
 
         if result:
             client_id = str(result[0])
+            recent_driver = str(result[1])
         else:
             client_id, user_name, cpu_info, disk_info, mac_address = get_client_id()
 
@@ -153,17 +155,20 @@ def init_client():
                 print("Error fetching client id")
                 raise
 
+            recent_driver = "token_drivers\\windows\\eps2003csp11v264.dll"
+
             # Begin a transaction
             connection.execute("BEGIN")
 
             cursor.execute('''
-                INSERT INTO client_info (client_id, user_name, cpu_info, disk_info, mac_address)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (client_id, user_name, cpu_info, disk_info, mac_address))
+                INSERT INTO client_info (client_id, user_name, cpu_info, disk_info, mac_address, recent_driver)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (client_id, user_name, cpu_info, disk_info, mac_address, recent_driver))
 
             connection.commit()
 
         app.client_id = client_id    
+        app.driver_path = recent_driver
     except sqlite3.Error as e:
         if connection:
             connection.rollback()
@@ -263,6 +268,35 @@ def get_dsc_reg_id(key_id):
 
     return reg_id
 
+def update_driver_path(recent_driver):
+    try:
+        conn = sqlite3.connect('signerData.db')  # Connect to SQLite database
+        cursor = conn.cursor()
+
+        conn.execute("BEGIN")
+
+        cursor.execute("""
+            UPDATE client_info
+            SET recent_driver = ?
+        """, (recent_driver,))
+
+        # Commit the transaction to save changes
+        conn.commit()
+
+        # Check if any row was updated
+        if cursor.rowcount == 0:
+            print(f"Error updating driver path {recent_driver}.")
+            raise
+
+    except sqlite3.Error as e:
+        if conn:
+            conn.rollback()
+        print(f"Database error: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
+
 def fetch_certificate_publicKey_ownerName(pkcsSession):
     certs = pkcsSession.findObjects([(PyKCS11.CKA_CLASS, PyKCS11.CKO_CERTIFICATE)])
     if not certs:
@@ -311,11 +345,69 @@ def get_internet_time():
         print(f"Error fetching internet time: {e}")
         return None
 
+def load_drivers_windows():
+    folder_path = "token_drivers\\windows"
+    try:
+        # List all files in the folder and filter by extensions
+        driver_files = [
+            os.path.join(folder_path, file)
+            for file in os.listdir(folder_path)
+            if file.endswith('.dll')  # Adjust for your OS
+        ]
+
+        print(driver_files)
+
+        if app.driver_path in driver_files:
+            driver_files.pop(driver_files.index(app.driver_path))
+            print(driver_files)
+            driver_files.insert(0, app.driver_path)
+            print(driver_files)
+
+        return driver_files
+    except FileNotFoundError:
+        print(f"Error: Folder not found at {folder_path}")
+        return []
+    except Exception as e:
+        print(f"Error reading drivers from folder: {str(e)}")
+        return []
+
+def load_token():
+    """
+    Tries to load a PKCS#11 driver from a list of driver paths and checks for available slots.
+
+    Args:
+        driver_paths (list): List of PKCS#11 driver paths to check.
+
+    Returns:
+        dict: Contains the status, slots information if successful, and the loaded driver path.
+    """
+    pkcs11 = PyKCS11.PyKCS11Lib()
+
+    driver_paths = load_drivers_windows()
+
+    for driver_path in driver_paths:
+        try:
+            # Attempt to load the PKCS#11 driver
+            pkcs11.load(driver_path)
+            print(f"Attempting to load driver: {driver_path}")
+
+            # Check for available slots with tokens
+            slots = pkcs11.getSlotList(tokenPresent=True)
+            if slots:
+                update_driver_path(driver_path)
+                app.driver_path = driver_path
+                return app.driver_path
+
+        except Exception as e:
+            print(f"Failed to load driver: {driver_path}. Error: {str(e)}")
+
+    return app.driver_path
+
 @app.route('/list-token', methods=['GET'])
 def list_tokens():
     pkcs11 = PyKCS11.PyKCS11Lib()
     try:
-        pkcs11.load(PKCS11_LIB_PATH)
+        pkcs11.load(load_token())
     except Exception as e:
         return jsonify({"error": "Failed to load PKCS#11 library. Please check the library path."}), 500
 
@@ -354,7 +446,7 @@ def register_token():
     
     pkcs11 = PyKCS11.PyKCS11Lib()
     try:
-        pkcs11.load(PKCS11_LIB_PATH)
+        pkcs11.load(app.driver_path)
     except Exception as e:
         return jsonify({"error": "Failed to load PKCS#11 library. Please check the library path."}), 500
     
@@ -436,7 +528,7 @@ def single_data_sign():
 
     pkcs11 = PyKCS11.PyKCS11Lib()
     try:
-        pkcs11.load(PKCS11_LIB_PATH)
+        pkcs11.load(app.driver_path)
     except Exception as e:
         return jsonify({"error": "Failed to load PKCS#11 library. Please check the library path."}), 500
 
