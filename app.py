@@ -246,6 +246,51 @@ def update_registration_status(reg_id):
         if conn:
             conn.close()
 
+def clear_failed_registration():
+    try:
+        conn = sqlite3.connect('signerData.db')  # Connect to SQLite database
+        cursor = conn.cursor()
+
+        conn.execute("BEGIN")
+        
+        cursor.execute("""
+            DELETE FROM registered_tokens
+            WHERE is_verified = 'N'
+        """,)
+
+        # Commit the transaction to save changes
+        conn.commit()
+    except sqlite3.Error as e:
+        if conn:
+            conn.rollback()
+        print(f"Database error: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+def clear_junk_registration(reg_id):
+    try:
+        conn = sqlite3.connect('signerData.db')  # Connect to SQLite database
+        cursor = conn.cursor()
+
+        conn.execute("BEGIN")
+        
+        cursor.execute("""
+            DELETE FROM registered_tokens
+            WHERE reg_id = ?
+        """,(reg_id,))
+
+        # Commit the transaction to save changes
+        conn.commit()
+    except sqlite3.Error as e:
+        if conn:
+            conn.rollback()
+        print(f"Database error: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+
 def get_dsc_reg_id(key_id):
     reg_id = None
 
@@ -255,7 +300,7 @@ def get_dsc_reg_id(key_id):
 
         key_id_base64 = base64.b64encode(key_id.encode('utf-8')).decode('utf-8')
 
-        cursor.execute("SELECT reg_id FROM registered_tokens WHERE key_id = ?", (key_id_base64,))
+        cursor.execute("SELECT reg_id FROM registered_tokens WHERE key_id = ? AND is_verified = 'Y'", (key_id_base64,))
         result = cursor.fetchone()
          
         if result:
@@ -355,13 +400,9 @@ def load_drivers_windows():
             if file.endswith('.dll')  # Adjust for your OS
         ]
 
-        print(driver_files)
-
         if app.driver_path in driver_files:
             driver_files.pop(driver_files.index(app.driver_path))
-            print(driver_files)
             driver_files.insert(0, app.driver_path)
-            print(driver_files)
 
         return driver_files
     except FileNotFoundError:
@@ -430,13 +471,25 @@ def list_tokens():
         if pkcsSession:
             pkcsSession.closeSession()
 
+@app.route('/list-token', methods=['PATCH'])
+def delete_junk_reg():
+    try:
+        reg_id = request.json.get("reg_id")
+
+        if reg_id:
+            clear_junk_registration(reg_id)
+
+        return jsonify({"status": "success"}), 200
+    except Exception as e:
+        return jsonify({"status": "success"}), 200
+
 @app.route('/register-token', methods=['POST'])
 def register_token():
     client_cert_hex = request.json.get("certificate")
     nonce = request.json.get("nonce")
     client_key_id_hex = request.json.get("key_id")
     
-    if not client_cert_hex or not nonce:
+    if not client_cert_hex or not nonce or not client_key_id_hex:
         return jsonify({"error": "Certificate, key and nonce are required"}), 400
     
     try:
@@ -479,7 +532,7 @@ def register_token():
         if not timestamp:
             timestamp = datetime.now(timezone.utc).isoformat() 
         
-        combined_data = (nonce + owner_name + timestamp).encode('utf-8')
+        combined_data = (nonce + owner_name + timestamp + key_id.hex() + app.client_id).encode('utf-8')
        
         priv_keys = pkcsSession.findObjects([(PyKCS11.CKA_CLASS, PyKCS11.CKO_PRIVATE_KEY)])
         if not priv_keys:
@@ -489,6 +542,8 @@ def register_token():
         signature = bytes(pkcsSession.sign(priv_key, combined_data, PyKCS11.Mechanism(PyKCS11.CKM_SHA256_RSA_PKCS)))
 
         reg_id = generate_base64_id([app.client_id, key_id.hex()])
+
+        clear_failed_registration()
         
         store_registration_data(reg_id, key_id.hex(), owner_name, nonce, signature.hex(), timestamp)
 
