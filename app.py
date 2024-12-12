@@ -216,6 +216,26 @@ def store_registration_data(unique_id, key_id, owner_name, nonce, signature, tim
         if conn:
             conn.close()
 
+def check_reg_status(reg_id):
+    status = False
+
+    try:
+        conn = sqlite3.connect('signerData.db')  
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT reg_id FROM registered_tokens WHERE reg_id = ?", (reg_id,))
+        result = cursor.fetchone()
+
+        if result:
+            status = True 
+    except sqlite3.Error as e:
+        print(f"Database error: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+    return status  
+
 def update_registration_status(reg_id):
     try:
         conn = sqlite3.connect('signerData.db')  # Connect to SQLite database
@@ -570,9 +590,14 @@ def verify_registration():
 
 @app.route('/single-data-sign', methods=['POST'])
 def single_data_sign():
+    reg_id = request.json.get("reg_id")
     hash_hex = request.json.get("hash")
-    if not hash_hex:
-        return jsonify({"error": "No hash provided"}), 400
+    if not reg_id or not hash_hex:
+        return jsonify({"error": "No hash or reg_id provided"}), 400
+    
+    is_registered = check_reg_status(reg_id)
+    if not is_registered:
+        return jsonify({"DSC Token not Registered"}), 400
 
     try:
         hash_bytes = bytes.fromhex(hash_hex)
