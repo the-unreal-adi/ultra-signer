@@ -216,14 +216,16 @@ def store_registration_data(unique_id, key_id, owner_name, nonce, signature, tim
         if conn:
             conn.close()
 
-def check_reg_status(reg_id):
+def check_reg_status(reg_id, key_id):
     status = False
 
     try:
         conn = sqlite3.connect('signerData.db')  
         cursor = conn.cursor()
 
-        cursor.execute("SELECT reg_id FROM registered_tokens WHERE reg_id = ?", (reg_id,))
+        key_id_base64 = base64.b64encode(key_id.encode('utf-8')).decode('utf-8')
+
+        cursor.execute("SELECT * FROM registered_tokens WHERE reg_id = ? AND key_id = ?", (reg_id, key_id_base64,))
         result = cursor.fetchone()
 
         if result:
@@ -591,11 +593,12 @@ def verify_registration():
 @app.route('/single-data-sign', methods=['POST'])
 def single_data_sign():
     reg_id = request.json.get("reg_id")
+    key_id_hex = request.json.get("key_id")
     hash_hex = request.json.get("hash")
-    if not reg_id or not hash_hex:
-        return jsonify({"error": "No hash or reg_id provided"}), 400
+    if not reg_id or not key_id_hex or not hash_hex:
+        return jsonify({"error": "No hash or key_id or reg_id provided"}), 400
     
-    is_registered = check_reg_status(reg_id)
+    is_registered = check_reg_status(reg_id, key_id_hex)
     if not is_registered:
         return jsonify({"DSC Token not Registered"}), 400
 
@@ -604,7 +607,7 @@ def single_data_sign():
     except ValueError:
         return jsonify({"error": "Invalid hash format"}), 400
 
-    hash_base64 = base64.b64encode(hash_bytes).decode('utf-8')
+    # hash_base64 = base64.b64encode(hash_bytes).decode('utf-8')
 
     pkcs11 = PyKCS11.PyKCS11Lib()
     try:
@@ -630,6 +633,11 @@ def single_data_sign():
         except PyKCS11.PyKCS11Error:
             logged_in = False
             return jsonify({"error": "Invalid PIN"}), 403
+        
+        cert_der, public_key, owner_name, key_id = fetch_certificate_publicKey_ownerName(pkcsSession)
+
+        if key_id_hex != key_id.hex():
+            return jsonify({"error": "Certificate key id does not match token"}), 403
 
         priv_keys = pkcsSession.findObjects([(PyKCS11.CKA_CLASS, PyKCS11.CKO_PRIVATE_KEY)])
         if not priv_keys:
@@ -640,11 +648,11 @@ def single_data_sign():
         if not timestamp:
             timestamp = datetime.now(timezone.utc).isoformat()
 
-        data = (hash_base64+timestamp).encode('utf-8')
+        data = (hash_hex+timestamp).encode('utf-8')
 
         signature = bytes(pkcsSession.sign(priv_key, data, PyKCS11.Mechanism(PyKCS11.CKM_SHA256_RSA_PKCS)))
         
-        return jsonify({"signature": signature.hex(), "timestamp": timestamp})
+        return jsonify({"signature": signature.hex(), "timestamp": timestamp, "key_id": key_id.hex(), "reg_id": reg_id})
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
