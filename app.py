@@ -16,9 +16,13 @@ import platform
 import hashlib
 import secrets
 import sqlite3
-import getpass
-import binascii
+import getpass 
 import os
+from pystray import Icon, Menu, MenuItem
+from PIL import Image, ImageDraw
+import threading 
+import os
+import signal
 
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(16)
@@ -598,9 +602,7 @@ def single_data_sign():
         hash_bytes = bytes.fromhex(hash_hex)
     except ValueError:
         return jsonify({"error": "Invalid hash format"}), 400
-
-    # hash_base64 = base64.b64encode(hash_bytes).decode('utf-8')
-
+ 
     pkcs11 = PyKCS11.PyKCS11Lib()
     try:
         pkcs11.load(app.driver_path)
@@ -653,8 +655,45 @@ def single_data_sign():
             if logged_in:
                 pkcsSession.logout()
             pkcsSession.closeSession()
+ 
+def on_exit(icon, item):
+    """Stop the system tray and Flask server."""
+    print("Exiting application...")
+    icon.stop()
+    stop_flask()
 
-if __name__ == '__main__':
+def stop_flask():
+    """Stop the Flask server by sending a termination signal."""
+    print("Stopping Flask server...")
+    os.kill(os.getpid(), signal.SIGINT)  # Send SIGINT to terminate the process gracefully
+
+def create_image():
+    """Create an icon image for the tray."""
+    width = 64
+    height = 64
+    color1 = "blue"
+    color2 = "white"
+
+    image = Image.new("RGB", (width, height), color1)
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((width // 4, height // 4, width * 3 // 4, height * 3 // 4), fill=color2)
+    return image
+
+def start_tray():
+    """Start the system tray icon."""
+    menu = Menu(MenuItem("Exit", on_exit))
+    icon = Icon("Ultra Signer", create_image(), menu=menu)
+    icon.run()
+
+def start_flask():
     init_db()
     init_client()
-    app.run(debug=True, host='127.0.0.1', port=8080)
+    app.run(host='127.0.0.1', port=8080, use_reloader=False)
+
+if __name__ == '__main__':
+    # Start Flask in a separate thread
+    flask_thread = threading.Thread(target=start_flask, daemon=True)
+    flask_thread.start()
+
+    # Start the system tray
+    start_tray()
