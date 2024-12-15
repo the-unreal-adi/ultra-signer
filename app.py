@@ -190,10 +190,6 @@ def store_registration_data(unique_id, key_id, owner_name, nonce, signature, tim
     All fields except the ID are stored in Base64 format. The ID is derived from a hash of provided components.
     """
     try:
-        signature_base64 = base64.b64encode(binascii.unhexlify(signature)).decode('utf-8')
-        nonce_base64 = base64.b64encode(nonce.encode('utf-8')).decode('utf-8')
-        key_id_base64 = base64.b64encode(key_id.encode('utf-8')).decode('utf-8')
-
         conn = sqlite3.connect('signerData.db')  # Connect to SQLite database
         cursor = conn.cursor()
 
@@ -204,7 +200,7 @@ def store_registration_data(unique_id, key_id, owner_name, nonce, signature, tim
         cursor.execute('''
             INSERT INTO registered_tokens (reg_id, key_id, owner_name, nonce, signature, timestamp, is_verified)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (unique_id, key_id_base64, owner_name, nonce_base64, signature_base64, timestamp, "N"))
+        ''', (unique_id, key_id, owner_name, nonce, signature, timestamp, "N"))
 
         conn.commit()  # Commit the transaction
     except sqlite3.Error as e:
@@ -223,9 +219,7 @@ def check_reg_status(reg_id, key_id):
         conn = sqlite3.connect('signerData.db')  
         cursor = conn.cursor()
 
-        key_id_base64 = base64.b64encode(key_id.encode('utf-8')).decode('utf-8')
-
-        cursor.execute("SELECT * FROM registered_tokens WHERE reg_id = ? AND key_id = ?", (reg_id, key_id_base64,))
+        cursor.execute("SELECT * FROM registered_tokens WHERE reg_id = ? AND key_id = ?", (reg_id, key_id,))
         result = cursor.fetchone()
 
         if result:
@@ -320,9 +314,7 @@ def get_dsc_reg_id(key_id):
         conn = sqlite3.connect('signerData.db')  # Connect to SQLite database
         cursor = conn.cursor()
 
-        key_id_base64 = base64.b64encode(key_id.encode('utf-8')).decode('utf-8')
-
-        cursor.execute("SELECT reg_id FROM registered_tokens WHERE key_id = ? AND is_verified = 'Y'", (key_id_base64,))
+        cursor.execute("SELECT reg_id FROM registered_tokens WHERE key_id = ? AND is_verified = 'Y'", (key_id,))
         result = cursor.fetchone()
          
         if result:
