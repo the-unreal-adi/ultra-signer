@@ -586,23 +586,43 @@ def verify_registration():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route('/single-data-sign', methods=['POST'])
-def single_data_sign():
+@app.route('/data-sign', methods=['POST'])
+def data_sign():
     reg_id = request.json.get("reg_id")
     key_id_hex = request.json.get("key_id")
-    hash_hex = request.json.get("hash")
-    if not reg_id or not key_id_hex or not hash_hex:
-        return jsonify({"error": "No hash or key_id or reg_id provided"}), 400
+    digests = request.json.get("digests")
+    
+    # Validate that we have the required data
+    if not reg_id or not key_id_hex:
+        return jsonify({"error": "Missing required fields: reg_id or key_id"}), 400
+
+    # Check that digests is a non-empty list
+    if not isinstance(digests, list) or len(digests) == 0:
+        return jsonify({"error": "Digests must be a non-empty list"}), 400
     
     is_registered = check_reg_status(reg_id, key_id_hex)
     if not is_registered:
         return jsonify({"DSC Token not Registered"}), 400
 
-    try:
-        hash_bytes = bytes.fromhex(hash_hex)
-    except ValueError:
-        return jsonify({"error": "Invalid hash format"}), 400
- 
+    valid_digests = []
+    for d in digests:
+        digest_id = d.get("digest_id", "").strip() if d.get("digest_id") else None
+        digest_value = d.get("digest_value", "").strip() if d.get("digest_value") else None
+
+        if digest_id and digest_value:
+            try:
+                bytes.fromhex(digest_value)
+                valid_digests.append({
+                    "digest_id": digest_id,
+                    "digest_value": digest_value
+                })
+            except ValueError as e:
+                pass
+
+    # If after filtering, no valid digests remain, handle accordingly
+    if len(valid_digests) == 0:
+        return jsonify({"error": "No valid digests found after filtering"}), 400
+
     pkcs11 = PyKCS11.PyKCS11Lib()
     try:
         pkcs11.load(app.driver_path)
@@ -638,15 +658,27 @@ def single_data_sign():
             raise ValueError("No private key found on the DSC token")
         priv_key = priv_keys[0]
 
-        timestamp = get_internet_time()
-        if not timestamp:
-            timestamp = datetime.now(timezone.utc).isoformat()
+        signed_digests = []
+        for vd in valid_digests:
+            digest_id = vd.get("digest_id")
+            digest_value = vd.get("digest_value")
 
-        data = (hash_hex+timestamp).encode('utf-8')
+            timestamp = get_internet_time()
+            if not timestamp:
+                timestamp = datetime.now(timezone.utc).isoformat()
 
-        signature = bytes(pkcsSession.sign(priv_key, data, PyKCS11.Mechanism(PyKCS11.CKM_SHA256_RSA_PKCS)))
+            data = (digest_value+timestamp).encode('utf-8')
+
+            try:
+                signature = bytes(pkcsSession.sign(priv_key, data, PyKCS11.Mechanism(PyKCS11.CKM_SHA256_RSA_PKCS)))
+                signed_digests.append({"sign_id": digest_id, "sign_value": signature.hex()})
+            except Exception:
+                pass
         
-        return jsonify({"signature": signature.hex(), "timestamp": timestamp, "key_id": key_id.hex(), "reg_id": reg_id})
+        if len(signed_digests) == 0:
+            return jsonify({"error": "Error signing digests"}), 400
+
+        return jsonify({"signed_digests": signed_digests, "timestamp": timestamp, "key_id": key_id.hex(), "reg_id": reg_id})
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
