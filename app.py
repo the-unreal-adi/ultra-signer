@@ -593,12 +593,12 @@ def data_sign():
     digests = request.json.get("digests")
     
     # Validate that we have the required data
-    if not reg_id or not key_id_hex:
-        return jsonify({"error": "Missing required fields: reg_id or key_id"}), 400
+    if not all([reg_id, key_id_hex, digests]):
+        return jsonify({"error": "Missing required fields."}), 400
 
-    # Check that digests is a non-empty list
-    if not isinstance(digests, list) or len(digests) == 0:
-        return jsonify({"error": "Digests must be a non-empty list"}), 400
+    # Check that digests is a list
+    if not isinstance(digests, list):
+        return jsonify({"error": "Digests must be a list"}), 400
     
     is_registered = check_reg_status(reg_id, key_id_hex)
     if not is_registered:
