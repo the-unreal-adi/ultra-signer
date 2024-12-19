@@ -671,14 +671,14 @@ def data_sign():
 
             try:
                 signature = bytes(pkcsSession.sign(priv_key, data, PyKCS11.Mechanism(PyKCS11.CKM_SHA256_RSA_PKCS)))
-                signed_digests.append({"sign_id": digest_id, "sign_value": signature.hex()})
+                signed_digests.append({"sign_id": digest_id, "sign_value": signature.hex(), "timestamp": timestamp})
             except Exception:
                 pass
         
         if len(signed_digests) == 0:
             return jsonify({"error": "Error signing digests"}), 400
 
-        return jsonify({"signed_digests": signed_digests, "timestamp": timestamp, "key_id": key_id.hex(), "reg_id": reg_id})
+        return jsonify({"signed_digests": signed_digests, "key_id": key_id.hex(), "reg_id": reg_id})
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
