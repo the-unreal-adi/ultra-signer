@@ -1,11 +1,11 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import PyKCS11 
 from cryptography import x509
+import PyKCS11
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
-from PyQt5 import QtWidgets
 import sys
+from PyQt5 import QtWidgets
 from multiprocessing import Pipe, Process
 from datetime import datetime, timezone
 import requests
@@ -16,13 +16,23 @@ import platform
 import hashlib
 import secrets
 import sqlite3
-import getpass 
-import os
+import getpass
 from pystray import Icon, Menu, MenuItem
 from PIL import Image, ImageDraw
 import threading 
 import os
 import signal
+import logging
+
+# Configure logging to write to a file
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("app.log"),
+        logging.StreamHandler()
+    ]
+)
 
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(16)
@@ -34,7 +44,16 @@ def get_mac_address():
     return mac
 
 def get_client_id():
-    print("Generating client id...")
+    """
+    Generate a unique client ID based on system information.
+
+    Returns:
+        tuple: A tuple containing the client ID, username, CPU info, disk info, and MAC address.
+
+    Raises:
+        Exception: If there is an error generating the client ID.
+    """
+    logging.info("Generating client id...")
     try:
         # Get CPU info (brand string or equivalent)
         cpu_info = platform.processor()
@@ -60,7 +79,8 @@ def get_client_id():
         machine_guid = uuid.uuid5(uuid.NAMESPACE_DNS, unique_string)
         return str(machine_guid), username, cpu_info, disk_info, mac_address
     except Exception as e:
-        return f"Error: {str(e)}"
+        logging.error(f"Error generating client ID: {str(e)}")
+        raise  
 
 def generate_base64_id(components):
     """
@@ -124,13 +144,13 @@ def init_db():
         # Roll back the transaction in case of an error
         if connection:
             connection.rollback()
-        print(f"Database error occurred: {e}")
+        logging.error(f"Database error occurred: {e}")
         raise
     except Exception as e:
         # Catch any other exceptions
         if connection:
             connection.rollback()
-        print(f"An error occurred: {e}")
+        logging.error(f"An error occurred: {e}")
         raise
     finally:
         # Ensure the connection is closed
@@ -156,7 +176,7 @@ def init_client():
             client_id, user_name, cpu_info, disk_info, mac_address = get_client_id()
 
             if not client_id:
-                print("Error fetching client id")
+                logging.error("Error fetching client id")
                 raise
 
             recent_driver = "token_drivers\\windows\\eps2003csp11v264.dll"
@@ -176,12 +196,12 @@ def init_client():
     except sqlite3.Error as e:
         if connection:
             connection.rollback()
-        print(f"Database error occurred: {e}")
+        logging.error(f"Database error occurred: {e}")
         raise
     except Exception as e:
         if connection:
             connection.rollback()
-        print(f"An error occurred: {e}")
+        logging.error(f"An error occurred: {e}")
         raise
     finally:
         # Ensure the connection is closed
@@ -210,7 +230,7 @@ def store_registration_data(unique_id, key_id, owner_name, nonce, signature, tim
     except sqlite3.Error as e:
         if conn:
             conn.rollback()
-        print(f"Database error: {e}")
+        logging.error(f"Database error: {e}")
         raise
     finally:
         if conn:
@@ -229,7 +249,7 @@ def check_reg_status(reg_id, key_id):
         if result:
             status = True 
     except sqlite3.Error as e:
-        print(f"Database error: {e}")
+        logging.error(f"Database error: {e}")
     finally:
         if conn:
             conn.close()
@@ -254,13 +274,13 @@ def update_registration_status(reg_id):
 
         # Check if any row was updated
         if cursor.rowcount == 0:
-            print(f"No record found with reg_id = {reg_id}.")
+            logging.error(f"No record found with reg_id = {reg_id}.")
             raise
 
     except sqlite3.Error as e:
         if conn:
             conn.rollback()
-        print(f"Database error: {e}")
+        logging.error(f"Database error: {e}")
         raise
     finally:
         if conn:
@@ -283,7 +303,7 @@ def clear_failed_registration():
     except sqlite3.Error as e:
         if conn:
             conn.rollback()
-        print(f"Database error: {e}")
+        logging.error(f"Database error: {e}")
     finally:
         if conn:
             conn.close()
@@ -305,7 +325,7 @@ def clear_junk_registration(reg_id):
     except sqlite3.Error as e:
         if conn:
             conn.rollback()
-        print(f"Database error: {e}")
+        logging.error(f"Database error: {e}")
     finally:
         if conn:
             conn.close()
@@ -324,7 +344,7 @@ def get_dsc_reg_id(key_id):
         if result:
             reg_id = str(result[0])
     except sqlite3.Error as e:
-        print(f"Database error: {e}")
+        logging.error(f"Database error: {e}")
     finally:
         if conn:
             conn.close()
@@ -348,13 +368,13 @@ def update_driver_path(recent_driver):
 
         # Check if any row was updated
         if cursor.rowcount == 0:
-            print(f"Error updating driver path {recent_driver}.")
+            logging.error(f"Error updating driver path {recent_driver}.")
             raise
 
     except sqlite3.Error as e:
         if conn:
             conn.rollback()
-        print(f"Database error: {e}")
+        logging.error(f"Database error: {e}")
         raise
     finally:
         if conn:
@@ -398,6 +418,25 @@ def prompt_for_pin():
     p.join()
     return parent_conn.recv()
 
+def message_prompt_in_process(conn, msg):
+    app = QtWidgets.QApplication(sys.argv)
+    message_box = QtWidgets.QMessageBox()
+    message_box.setIcon(QtWidgets.QMessageBox.Information)
+    message_box.setText(msg)
+    message_box.setWindowTitle("Message")
+    message_box.setStandardButtons(QtWidgets.QMessageBox.Ok)
+    message_box.exec_()
+ 
+    conn.close()
+    app.quit()
+    sys.exit(0)
+
+def message_prompt(msg):
+    parent_conn, child_conn = Pipe()
+    p = Process(target=message_prompt_in_process, args=(child_conn, msg))
+    p.start()
+    p.join()
+    
 def get_internet_time():
     try:
         response = requests.get("https://timeapi.io/api/Time/current/zone?timeZone=UTC")
@@ -405,7 +444,7 @@ def get_internet_time():
         data = response.json()
         return str(data["dateTime"])  
     except Exception as e:
-        print(f"Error fetching internet time: {e}")
+        logging.error(f"Error fetching internet time: {e}")
         return None
 
 def load_drivers_windows():
@@ -424,10 +463,10 @@ def load_drivers_windows():
 
         return driver_files
     except FileNotFoundError:
-        print(f"Error: Folder not found at {folder_path}")
+        logging.error(f"Error: Folder not found at {folder_path}")
         return []
     except Exception as e:
-        print(f"Error reading drivers from folder: {str(e)}")
+        logging.error(f"Error reading drivers from folder: {str(e)}")
         return []
 
 def load_token():
@@ -448,7 +487,7 @@ def load_token():
         try:
             # Attempt to load the PKCS#11 driver
             pkcs11.load(driver_path)
-            print(f"Attempting to load driver: {driver_path}")
+            logging.info(f"Attempting to load driver: {driver_path}")
 
             # Check for available slots with tokens
             slots = pkcs11.getSlotList(tokenPresent=True)
@@ -458,7 +497,7 @@ def load_token():
                 return app.driver_path
 
         except Exception as e:
-            print(f"Failed to load driver: {driver_path}. Error: {str(e)}")
+            logging.error(f"Failed to load driver: {driver_path}. Error: {str(e)}")
 
     return app.driver_path
 
@@ -527,7 +566,8 @@ def register_token():
     
     pin = prompt_for_pin()
     if not pin:
-        return jsonify({"error": "Invalid PIN provided"}), 400
+        message_prompt("Invalid PIN")
+        return jsonify({"error": "Invalid PIN"}), 400
     pkcsSession = None
     logged_in = True
     try:
@@ -536,6 +576,7 @@ def register_token():
             pkcsSession.login(pin)
         except PyKCS11.PyKCS11Error:
             logged_in = False
+            message_prompt("Invalid PIN")
             return jsonify({"error": "Invalid PIN"}), 403
 
         cert_der, public_key, owner_name, key_id = fetch_certificate_publicKey_ownerName(pkcsSession)
@@ -602,7 +643,7 @@ def data_sign():
     
     is_registered = check_reg_status(reg_id, key_id_hex)
     if not is_registered:
-        return jsonify({"DSC Token not Registered"}), 400
+        return jsonify({"error": "DSC Token not Registered"}), 400
 
     valid_digests = []
     for d in digests:
@@ -635,7 +676,8 @@ def data_sign():
 
     pin = prompt_for_pin()
     if not pin:
-        return jsonify({"error": "Invalid PIN provided"}), 400
+        message_prompt("Invalid PIN")
+        return jsonify({"error": "Invalid PIN"}), 400
     
     pkcsSession = None
     logged_in = True
@@ -646,6 +688,7 @@ def data_sign():
             pkcsSession.login(pin)
         except PyKCS11.PyKCS11Error:
             logged_in = False
+            message_prompt("Invalid PIN")
             return jsonify({"error": "Invalid PIN"}), 403
         
         cert_der, public_key, owner_name, key_id = fetch_certificate_publicKey_ownerName(pkcsSession)
