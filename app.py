@@ -945,7 +945,6 @@ def start_tray():
 def start_flask():
     init_db()
     init_client()
-    os.makedirs("logs", exist_ok=True)
     app.run(host='127.0.0.1', port=8080, use_reloader=False)
 
 if __name__ == '__main__':
