@@ -7,7 +7,7 @@ from cryptography.hazmat.primitives import serialization
 import sys
 from PyQt5 import QtWidgets
 from multiprocessing import Pipe, Process
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import requests
 import base64
 import uuid
@@ -22,17 +22,19 @@ from PIL import Image, ImageDraw
 import threading 
 import os
 import signal
-import logging
-
+import logging 
+ 
 # Configure logging to write to a file
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("app.log"),
+        logging.FileHandler(f"logs\\app-{datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime('%Y-%m-%d')}.log"),
         logging.StreamHandler()
     ]
 )
+
+CRL_REFRESH_INTERVAL = 3600  # 1 hour
 
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(16)
@@ -135,6 +137,16 @@ def init_db():
                 signature TEXT NOT NULL,
                 timestamp TEXT NOT NULL,
                 is_verified TEXT NOT NULL
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS crl_cache (
+                cdp_id TEXT PRIMARY KEY,
+                crl_url TEXT NOT NULL,
+                crl_data BLOB NOT NULL,
+                last_updated TEXT NOT NULL,
+                next_update TEXT NOT NULL
             )
         ''')
 
@@ -380,6 +392,171 @@ def update_driver_path(recent_driver):
         if conn:
             conn.close()
 
+def fetch_crl_from_cache(crl_url):
+    try:
+        conn = sqlite3.connect('signerData.db')  # Connect to SQLite database
+        cursor = conn.cursor()
+
+        cdp_id = generate_base64_id([crl_url])
+        current_time = datetime.now(timezone.utc).isoformat()
+        
+        cursor.execute("SELECT crl_data FROM crl_cache WHERE cdp_id = ? AND next_update >= ?", (cdp_id, current_time,))
+        result = cursor.fetchone()
+
+        if result:
+            return x509.load_der_x509_crl(result[0], default_backend())
+    except sqlite3.Error as e:
+        logging.error(f"Database error: {e}")
+        return None
+    finally:
+        if conn:
+            conn.close()
+
+def store_update_crl_to_cache(crl_url, crl_data):
+    try:
+        conn = sqlite3.connect('signerData.db')  # Connect to SQLite database
+        cursor = conn.cursor()
+
+        cdp_id = generate_base64_id([crl_url])
+        last_updated = datetime.now(timezone.utc).isoformat()
+        next_update = (datetime.now(timezone.utc) + timedelta(seconds=CRL_REFRESH_INTERVAL)).isoformat()
+        crl_data_serialized = crl_data.public_bytes(serialization.Encoding.DER)    
+
+        conn.execute("BEGIN")
+
+        cursor.execute("""
+            INSERT OR REPLACE INTO crl_cache (cdp_id, crl_url, crl_data, last_updated, next_update)
+            VALUES (?, ?, ?, ?, ?)
+        """, (cdp_id, crl_url, crl_data_serialized, last_updated, next_update,))
+
+        cursor.execute("DELETE FROM crl_cache WHERE last_updated < ?", ((datetime.now(timezone.utc) - timedelta(days=45)).isoformat(),))
+
+        conn.commit()  # Commit the transaction
+    except sqlite3.Error as e:
+        if conn:
+            conn.rollback()
+        logging.error(f"Database error: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
+
+def fetch_crl_for_certificate(certificate):
+    """
+    Fetch and load the CRL from the certificate's CRL Distribution Point (CDP).
+    """
+    try:
+        # Get the CRL Distribution Point (CDP) from the certificate
+        crl_dps = certificate.extensions.get_extension_for_class(
+            x509.CRLDistributionPoints
+        ).value
+
+        logging.info(f"Found CRL Distribution Points: {crl_dps}")
+
+        crl_url = crl_dps[0].full_name[0].value  # Assuming the first CRL point is the target
+
+        logging.info("Fetching CRL from cache...")
+
+        crl = fetch_crl_from_cache(crl_url)
+
+        if crl:
+            logging.info(f"CRL found in cache for: {crl.issuer}")
+        else:
+            logging.info("CRL not found in cache.")
+
+            logging.info(f"Fetching CRL from: {crl_url}")
+
+            # Fetch the CRL from the URL
+            response = requests.get(crl_url)
+            response.raise_for_status()
+
+            # Load the CRL
+            crl = x509.load_der_x509_crl(response.content, default_backend())
+
+            logging.info(f"CRL fetched successfully: {crl.issuer}")
+
+            logging.info("Caching CRL...")
+            store_update_crl_to_cache(crl_url, crl)
+
+        return crl
+    except Exception as e:
+        logging.error(f"Error fetching CRL: {e}")
+        return None
+
+def is_certificate_revoked(certificate):
+    """
+    Check if the given certificate is revoked using the provided CRL.
+
+    Args:
+        certificate (x509.Certificate): The certificate to check.
+        crl (x509.CertificateRevocationList): The CRL to use for checking.
+
+    Returns:
+        bool: True if the certificate is revoked, False otherwise.
+    """
+    try:
+        # Get the certificate serial number
+        serial_number = certificate.serial_number
+
+        logging.info(f"Checking certificate revocation for: {certificate.subject}")
+
+        crl = fetch_crl_for_certificate(certificate)
+
+        if not crl:
+            logging.error("No CRL found for certificate.")
+            return True
+
+        # Check the CRL for the serial number
+        for revoked_cert in crl: 
+            if revoked_cert.serial_number == serial_number:
+                logging.warning(f"Certificate {serial_number} is revoked.")
+                return True
+
+        return False
+    except Exception as e:
+        logging.error(f"Error checking certificate revocation: {e}")
+        return True  # Assume revoked if an error occurs
+    
+def is_certificate_expired(certificate):
+    """
+    Check if the certificate is expired.
+
+    Args:
+        certificate (x509.Certificate): The certificate to check.
+
+    Returns:
+        bool: True if the certificate is expired, False otherwise.
+    """
+    current_time = datetime.now(timezone.utc)
+
+    if certificate.not_valid_before_utc > current_time:
+        logging.warning("Certificate is not yet valid.")
+        return True
+
+    if certificate.not_valid_after_utc < current_time:
+        logging.warning("Certificate has expired.")
+        return True
+
+    return False
+
+def is_certificate_valid(certificate):
+    """
+    Check if the certificate is valid.
+
+    Args:
+        certificate (x509.Certificate): The certificate to check.
+
+    Returns:
+        bool: True if the certificate is valid, False otherwise.
+    """
+    if is_certificate_expired(certificate):
+        return False
+
+    if is_certificate_revoked(certificate):
+        return False
+
+    return True
+
 def fetch_certificate_publicKey_ownerName(pkcsSession):
     certs = pkcsSession.findObjects([(PyKCS11.CKA_CLASS, PyKCS11.CKO_CERTIFICATE)])
     if not certs:
@@ -388,6 +565,10 @@ def fetch_certificate_publicKey_ownerName(pkcsSession):
     cert_der = bytes(pkcsSession.getAttributeValue(certs[0], [PyKCS11.CKA_VALUE], True)[0])
     
     certificate = x509.load_der_x509_certificate(cert_der, default_backend())
+
+    if not is_certificate_valid(certificate):
+        message_prompt("Certificate is not valid")
+        raise ValueError("Certificate is not valid")
     
     public_key = certificate.public_key()
     public_key_der = public_key.public_bytes(encoding=serialization.Encoding.DER, format=serialization.PublicFormat.SubjectPublicKeyInfo) 
@@ -572,14 +753,15 @@ def register_token():
     logged_in = True
     try:
         pkcsSession = pkcs11.openSession(slots[0])
+        
+        cert_der, public_key, owner_name, key_id = fetch_certificate_publicKey_ownerName(pkcsSession)
+
         try:
             pkcsSession.login(pin)
         except PyKCS11.PyKCS11Error:
             logged_in = False
             message_prompt("Invalid PIN")
             return jsonify({"error": "Invalid PIN"}), 403
-
-        cert_der, public_key, owner_name, key_id = fetch_certificate_publicKey_ownerName(pkcsSession)
         
         if client_cert_hex != cert_der.hex():
             return jsonify({"error": "Certificate does not match token"}), 403
@@ -684,14 +866,14 @@ def data_sign():
     try:
         pkcsSession = pkcs11.openSession(slots[0])
 
+        cert_der, public_key, owner_name, key_id = fetch_certificate_publicKey_ownerName(pkcsSession)
+
         try:
             pkcsSession.login(pin)
         except PyKCS11.PyKCS11Error:
             logged_in = False
             message_prompt("Invalid PIN")
             return jsonify({"error": "Invalid PIN"}), 403
-        
-        cert_der, public_key, owner_name, key_id = fetch_certificate_publicKey_ownerName(pkcsSession)
 
         if key_id_hex != key_id.hex():
             return jsonify({"error": "Certificate key id does not match token"}), 403
@@ -763,6 +945,7 @@ def start_tray():
 def start_flask():
     init_db()
     init_client()
+    os.makedirs("logs", exist_ok=True)
     app.run(host='127.0.0.1', port=8080, use_reloader=False)
 
 if __name__ == '__main__':
