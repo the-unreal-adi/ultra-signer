@@ -579,6 +579,9 @@ def fetch_certificate_publicKey_ownerName(pkcsSession):
 
     key_id = bytes(pkcsSession.getAttributeValue(pub_key, [PyKCS11.CKA_ID], True)[0])
 
+    if not key_id:
+        key_id = hashlib.sha1(str(public_key_der.hex()).encode('utf-8')).digest()
+
     return cert_der, public_key_der, owner_name, key_id
 
 def prompt_for_pin_in_process(conn):
