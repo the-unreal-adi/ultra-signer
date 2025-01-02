@@ -136,7 +136,7 @@ def init_db():
                 user_id TEXT NOT NULL,
                 nonce TEXT NOT NULL,
                 signature TEXT NOT NULL,
-                domain_ip TEXT NOT NULL,
+                domain TEXT NOT NULL,
                 timestamp TEXT NOT NULL,
                 is_verified TEXT NOT NULL
             )
@@ -222,7 +222,7 @@ def init_client():
         if connection:
             connection.close()
 
-def store_registration_data(unique_id, key_id, owner_name, user_id, nonce, signature, domain_ip, timestamp):
+def store_registration_data(unique_id, key_id, owner_name, user_id, nonce, signature, domain, timestamp):
     """
     Store the verified registration data in the 'registered_tokens' SQLite database table.
     All fields except the ID are stored in Base64 format. The ID is derived from a hash of provided components.
@@ -236,9 +236,9 @@ def store_registration_data(unique_id, key_id, owner_name, user_id, nonce, signa
 
         # Insert the verified registration data
         cursor.execute('''
-            INSERT INTO registered_tokens (reg_id, key_id, owner_name, user_id, nonce, signature, domain_ip, timestamp, is_verified)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (unique_id, key_id, owner_name, user_id, nonce, signature, domain_ip, timestamp, "N"))
+            INSERT INTO registered_tokens (reg_id, key_id, owner_name, user_id, nonce, signature, domain, timestamp, is_verified)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (unique_id, key_id, owner_name, user_id, nonce, signature, domain, timestamp, "N"))
 
         conn.commit()  # Commit the transaction
     except sqlite3.Error as e:
@@ -250,14 +250,14 @@ def store_registration_data(unique_id, key_id, owner_name, user_id, nonce, signa
         if conn:
             conn.close()
 
-def check_reg_status(reg_id, key_id, user_id, domain_ip):
+def check_reg_status(reg_id, key_id, user_id, domain):
     status = False
 
     try:
         conn = sqlite3.connect('signerData.db')  
         cursor = conn.cursor()
 
-        cursor.execute("SELECT * FROM registered_tokens WHERE reg_id = ? AND key_id = ? AND user_id = ? AND domain_ip = ? AND is_verified = 'Y'", (reg_id, key_id, user_id, domain_ip,))
+        cursor.execute("SELECT * FROM registered_tokens WHERE reg_id = ? AND key_id = ? AND user_id = ? AND domain = ? AND is_verified = 'Y'", (reg_id, key_id, user_id, domain,))
         result = cursor.fetchone()
 
         if result:
@@ -345,14 +345,14 @@ def clear_junk_registration(reg_id):
             conn.close()
 
 
-def get_dsc_reg_id(key_id, user_id, domain_ip):
+def get_dsc_reg_id(key_id, user_id, domain):
     reg_id = None
 
     try:
         conn = sqlite3.connect('signerData.db')  # Connect to SQLite database
         cursor = conn.cursor()
 
-        cursor.execute("SELECT reg_id FROM registered_tokens WHERE key_id = ? AND user_id = ? And domain_ip = ? AND is_verified = 'Y'", (key_id, user_id, domain_ip,))
+        cursor.execute("SELECT reg_id FROM registered_tokens WHERE key_id = ? AND user_id = ? And domain = ? AND is_verified = 'Y'", (key_id, user_id, domain,))
         result = cursor.fetchone()
          
         if result:
@@ -690,9 +690,9 @@ def load_token():
 @app.route('/list-token', methods=['POST'])
 def list_tokens():
     user_id = request.json.get("user_id")
-    domain_ip = request.json.get("domain_ip")
+    domain = request.json.get("domain")
 
-    if not all([user_id, domain_ip]):
+    if not all([user_id, domain]):
         return jsonify({"error": "Insufficient parameters for token listing."}), 400
 
     pkcs11 = PyKCS11.PyKCS11Lib()
@@ -711,7 +711,7 @@ def list_tokens():
 
         cert_der, public_key, owner_name, key_id = fetch_certificate_publicKey_ownerName(pkcsSession)
         
-        reg_id = get_dsc_reg_id(key_id.hex(), user_id, domain_ip)
+        reg_id = get_dsc_reg_id(key_id.hex(), user_id, domain)
 
         return jsonify({"certficate":cert_der.hex(), "public_key":public_key.hex(), "owner_name":owner_name, "key_id":key_id.hex(), "client_id": app.client_id, "reg_id": reg_id})
     except Exception as e:
@@ -739,9 +739,9 @@ def register_token():
     client_key_id_hex = request.json.get("key_id")
     user_id = request.json.get("user_id")
     client_ip = request.json.get("client_ip")
-    domain_ip = request.json.get("domain_ip")
+    domain = request.json.get("domain")
     
-    if not all([client_cert_hex, nonce, client_key_id_hex, client_ip, domain_ip]):
+    if not all([client_cert_hex, nonce, client_key_id_hex, client_ip, domain]):
         return jsonify({"error": "Insufficient parameters for token registration."}), 400
     
     try:
@@ -787,7 +787,7 @@ def register_token():
         if not timestamp:
             timestamp = datetime.now(timezone.utc).isoformat() 
         
-        combined_data = (nonce + owner_name + timestamp + key_id.hex() + app.client_id + client_ip + domain_ip + user_id).encode('utf-8')
+        combined_data = (nonce + owner_name + timestamp + key_id.hex() + app.client_id + client_ip + domain + user_id).encode('utf-8')
        
         priv_keys = pkcsSession.findObjects([(PyKCS11.CKA_CLASS, PyKCS11.CKO_PRIVATE_KEY)])
         if not priv_keys:
@@ -796,11 +796,11 @@ def register_token():
        
         signature = bytes(pkcsSession.sign(priv_key, combined_data, PyKCS11.Mechanism(PyKCS11.CKM_SHA256_RSA_PKCS)))
 
-        reg_id = generate_base64_id([app.client_id, key_id.hex(), domain_ip, user_id])
+        reg_id = generate_base64_id([app.client_id, key_id.hex(), domain, user_id])
 
         clear_failed_registration()
         
-        store_registration_data(reg_id, key_id.hex(), owner_name, nonce, signature.hex(), timestamp)
+        store_registration_data(reg_id, key_id.hex(), owner_name, user_id, nonce, signature.hex(), domain, timestamp)
 
         return jsonify({"key_id":key_id.hex(), "signature": signature.hex(), "timestamp": timestamp, "client_mac": get_mac_address(), "client_id": app.client_id, "reg_id": reg_id})
     except Exception as e:
@@ -829,17 +829,17 @@ def data_sign():
     key_id_hex = request.json.get("key_id")
     digests = request.json.get("digests")
     user_id = request.json.get("user_id")
-    domain_ip = request.json.get("domain_ip")
+    domain = request.json.get("domain")
     
     # Validate that we have the required data
-    if not all([reg_id, key_id_hex, digests, user_id, domain_ip]):
+    if not all([reg_id, key_id_hex, digests, user_id, domain]):
         return jsonify({"error": "Missing required fields."}), 400
 
     # Check that digests is a list
     if not isinstance(digests, list):
         return jsonify({"error": "Digests must be a list"}), 400
     
-    is_registered = check_reg_status(reg_id, key_id_hex, user_id, domain_ip)
+    is_registered = check_reg_status(reg_id, key_id_hex, user_id, domain)
     if not is_registered:
         return jsonify({"error": "DSC Token not Registered"}), 400
 
