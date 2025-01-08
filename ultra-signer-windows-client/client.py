@@ -295,16 +295,5 @@ def start_tray():
     icon = Icon("Ultra Signer", create_image(), menu=menu)
     icon.run()
 
-def is_already_running():
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        s.bind(("127.0.0.1", 41769))  # Bind to a specific port
-    except socket.error:
-        message_prompt("An instance of the application is already running...")
-        sys.exit(1)
-
 if __name__ == '__main__':
-    is_already_running() 
-
-    # Start the system tray
     start_tray()

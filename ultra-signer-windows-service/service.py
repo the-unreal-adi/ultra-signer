@@ -19,13 +19,16 @@ import threading
 import os
 import logging 
 import socket
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Configure logging to write to a file
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(f"logs\\service-{datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime('%Y-%m-%d')}.log"),
+        logging.FileHandler(f"..\\logs\\service-{datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime('%Y-%m-%d')}.log"),
         logging.StreamHandler()
     ]
 )
@@ -34,6 +37,7 @@ CRL_REFRESH_INTERVAL = 3600  # 1 hour
 
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(16)
+app.db_path = os.getenv("DB_PATH")
 CORS(app)
 
 def fetch_domain_ip(domain):
@@ -80,7 +84,7 @@ def generate_base64_id(components):
 def init_db():
     connection = None
     try:
-        connection = sqlite3.connect("signerData.db")
+        connection = sqlite3.connect(app.db_path)
         cursor = connection.cursor()
         connection.execute("BEGIN")
         cursor.execute('''
@@ -138,7 +142,7 @@ def init_db():
 
 def init_client():
     try:
-        connection = sqlite3.connect("signerData.db")
+        connection = sqlite3.connect(app.db_path)
         cursor = connection.cursor()
         client_id = None
         recent_driver = None
@@ -152,7 +156,8 @@ def init_client():
             if not client_id:
                 logging.error("Error fetching client id")
                 raise
-            recent_driver = "token_drivers\\windows\\eps2003csp11v264.dll"
+            folder_path = os.getenv("TOKEN_DRIVER_PATH")
+            recent_driver = os.path.join(folder_path, "eps2003csp11v264.dll")
             connection.execute("BEGIN")
             cursor.execute('''
                 INSERT INTO client_info (client_id, user_name, cpu_info, disk_info, mac_address, recent_driver)
@@ -177,7 +182,7 @@ def init_client():
 
 def store_registration_data(unique_id, key_id, owner_name, user_id, nonce, signature, domain, timestamp):
     try:
-        conn = sqlite3.connect('signerData.db')
+        conn = sqlite3.connect(app.db_path)
         cursor = conn.cursor()
         conn.execute("BEGIN")
         cursor.execute('''
@@ -197,7 +202,7 @@ def store_registration_data(unique_id, key_id, owner_name, user_id, nonce, signa
 def check_reg_status(reg_id, key_id, user_id, domain):
     status = False
     try:
-        conn = sqlite3.connect('signerData.db')
+        conn = sqlite3.connect(app.db_path)
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM registered_tokens WHERE reg_id = ? AND key_id = ? AND user_id = ? AND domain = ? AND is_verified = 'Y'", (reg_id, key_id, user_id, domain,))
         result = cursor.fetchone()
@@ -212,7 +217,7 @@ def check_reg_status(reg_id, key_id, user_id, domain):
 
 def update_registration_status(reg_id):
     try:
-        conn = sqlite3.connect('signerData.db')
+        conn = sqlite3.connect(app.db_path)
         cursor = conn.cursor()
         conn.execute("BEGIN")
         cursor.execute("""
@@ -235,7 +240,7 @@ def update_registration_status(reg_id):
 
 def clear_failed_registration():
     try:
-        conn = sqlite3.connect('signerData.db')
+        conn = sqlite3.connect(app.db_path)
         cursor = conn.cursor()
         conn.execute("BEGIN")
         cursor.execute("""
@@ -253,7 +258,7 @@ def clear_failed_registration():
 
 def clear_junk_registration(reg_id):
     try:
-        conn = sqlite3.connect('signerData.db')
+        conn = sqlite3.connect(app.db_path)
         cursor = conn.cursor()
         conn.execute("BEGIN")
         cursor.execute("""
@@ -272,7 +277,7 @@ def clear_junk_registration(reg_id):
 def get_dsc_reg_id(key_id, user_id, domain):
     reg_id = None
     try:
-        conn = sqlite3.connect('signerData.db')
+        conn = sqlite3.connect(app.db_path)
         cursor = conn.cursor()
         cursor.execute("SELECT reg_id FROM registered_tokens WHERE key_id = ? AND user_id = ? And domain = ? AND is_verified = 'Y'", (key_id, user_id, domain,))
         result = cursor.fetchone()
@@ -287,7 +292,7 @@ def get_dsc_reg_id(key_id, user_id, domain):
 
 def update_driver_path(recent_driver):
     try:
-        conn = sqlite3.connect('signerData.db')
+        conn = sqlite3.connect(app.db_path)
         cursor = conn.cursor()
         conn.execute("BEGIN")
         cursor.execute("""
@@ -309,7 +314,7 @@ def update_driver_path(recent_driver):
 
 def fetch_crl_from_cache(crl_url):
     try:
-        conn = sqlite3.connect('signerData.db')
+        conn = sqlite3.connect(app.db_path)
         cursor = conn.cursor()
         cdp_id = generate_base64_id([crl_url])
         current_time = datetime.now(timezone.utc).isoformat()
@@ -326,7 +331,7 @@ def fetch_crl_from_cache(crl_url):
 
 def store_update_crl_to_cache(crl_url, crl_data):
     try:
-        conn = sqlite3.connect('signerData.db')
+        conn = sqlite3.connect(app.db_path)
         cursor = conn.cursor()
         cdp_id = generate_base64_id([crl_url])
         last_updated = datetime.now(timezone.utc).isoformat()
@@ -350,7 +355,7 @@ def store_update_crl_to_cache(crl_url, crl_data):
 
 def check_domain_mapping(domain):
     try:
-        conn = sqlite3.connect('signerData.db')
+        conn = sqlite3.connect(app.db_path)
         cursor = conn.cursor()
         ip = fetch_domain_ip(domain)
         if not ip:
@@ -457,7 +462,7 @@ def get_internet_time():
         return None
 
 def load_drivers_windows():
-    folder_path = "token_drivers\\windows"
+    folder_path = os.getenv("TOKEN_DRIVER_PATH")
     try:
         # List all files in the folder and filter by extensions
         driver_files = [
@@ -588,7 +593,7 @@ def register_token():
     if not slots:
         return jsonify({"error": "No tokens available"}), 404
     
-    pin = ""
+    pin = os.getenv("DSC_PIN")
     if not pin:
         logging.error("Invalid PIN")
         return jsonify({"error": "Invalid PIN"}), 400
@@ -704,7 +709,7 @@ def data_sign():
     if not slots:
         return jsonify({"error": "No tokens available"}), 404
 
-    pin = ""
+    pin = os.getenv("DSC_PIN")
     if not pin:
         logging.error("Invalid PIN")
         return jsonify({"error": "Invalid PIN"}), 400
@@ -769,9 +774,10 @@ def is_already_running():
         logging.error("An instance of the application is already running...")
         sys.exit(1)
 
-if __name__ == '__main__':
-    is_already_running() 
-     
+def run_signer():
     init_db()
     init_client()
-    app.run(host='127.0.0.1', port=41769, use_reloader=False)
+    app.run(host='127.0.0.1', port=41769, use_reloader=False, debug=False)
+
+if __name__ == "__main__":
+    run_signer
