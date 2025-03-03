@@ -7,7 +7,8 @@ from cryptography.hazmat.primitives import serialization
 import sys
 from PyQt5 import QtWidgets, QtCore
 from multiprocessing import Pipe, Process
-from datetime import datetime, timedelta, timezone
+import ntplib
+from datetime import datetime, timedelta, timezone, UTC
 import requests
 import base64
 import uuid
@@ -859,10 +860,10 @@ def manage_domain_mapping_prompt():
     
 def get_internet_time():
     try:
-        response = requests.get("https://timeapi.io/api/Time/current/zone?timeZone=UTC")
-        response.raise_for_status()  
-        data = response.json()
-        return str(data["dateTime"])  
+        client = ntplib.NTPClient()
+        response = client.request('pool.ntp.org', version=3)
+        utc_time = datetime.fromtimestamp(response.tx_time, UTC)
+        return utc_time.strftime('%Y-%m-%dT%H:%M:%S.') + f"{utc_time.microsecond:06d}0"
     except Exception as e:
         logging.error(f"Error fetching internet time: {e}")
         return None
