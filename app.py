@@ -98,21 +98,10 @@ def get_client_id():
         raise  
 
 def generate_base64_id(components):
-    """
-    Generate a 16-byte hash-based ID from a list of components and return it as Base64.
-    Each component is concatenated into a single string before hashing.
-    
-    Args:
-        components (list): List of string components to include in the hash.
-
-    Returns:
-        str: Base64-encoded 16-byte hash.
-    """
     # Join the components into a single string
     combined_data = ''.join(components).encode('utf-8')
-    
-    # Generate a 16-byte hash (MD5)
-    hash_object = hashlib.md5(combined_data)  # Use MD5 for a 16-byte hash
+
+    hash_object = hashlib.sha1(combined_data)  # Create a SHA-1 hash object
     hash_bytes = hash_object.digest()
     
     # Encode the hash in Base64
