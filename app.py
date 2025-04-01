@@ -172,6 +172,14 @@ def init_db():
             )
         ''')
 
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS wrong_pin_entry  (
+                key_id TEXT PRIMARY KEY,
+                wrong_pin_count INTEGER NOT NULL,
+                last_entry_time TEXT NOT NULL
+            )
+        ''')
+
         # Commit the transaction
         connection.commit()
     except sqlite3.Error as e:
@@ -572,6 +580,76 @@ def remove_domain_mapping(domain):
     finally:
         if conn:
             conn.close()
+
+def add_update_wrong_pin_entry(key_id):
+    try:
+        conn = sqlite3.connect('signerData.db')  # Connect to SQLite database
+        cursor = conn.cursor()
+
+        conn.execute("BEGIN")
+
+        cursor.execute("SELECT wrong_pin_count, last_entry_time FROM wrong_pin_entry WHERE key_id = ?", (key_id,))
+        result = cursor.fetchone()
+
+        current_time = datetime.now(timezone.utc).isoformat()
+
+        if result:
+            wrong_pin_count, last_entry_time = result
+            last_entry_time = datetime.fromisoformat(last_entry_time)
+
+            if (datetime.now(timezone.utc) - last_entry_time).total_seconds() < 300: 
+                wrong_pin_count += 1
+            else:
+                wrong_pin_count = 1
+
+            cursor.execute("""
+            UPDATE wrong_pin_entry
+            SET wrong_pin_count = ?, last_entry_time = ?
+            WHERE key_id = ?
+            """, (wrong_pin_count, current_time, key_id))
+        else:
+            cursor.execute("""
+            INSERT INTO wrong_pin_entry (key_id, wrong_pin_count, last_entry_time)
+            VALUES (?, ?, ?)
+            """, (key_id, 1, current_time))
+
+        conn.commit()
+    except sqlite3.Error as e:
+        if conn:
+            conn.rollback()
+        logging.error(f"Database error in add_update_wrong_pin_entry: {e}")
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        logging.error(f"Error in add_update_wrong_pin_entry: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+def check_wrong_pin_entry(key_id):
+    try:
+        conn = sqlite3.connect('signerData.db')  # Connect to SQLite database
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT wrong_pin_count, last_entry_time FROM wrong_pin_entry WHERE key_id = ?", (key_id,))
+        result = cursor.fetchone()
+
+        if result:
+            wrong_pin_count, last_entry_time = result
+            last_entry_time = datetime.fromisoformat(last_entry_time)
+
+            if (datetime.now(timezone.utc) - last_entry_time).total_seconds() < 300: 
+                return wrong_pin_count
+            else:
+                return 0
+    except sqlite3.Error as e:
+        logging.error(f"Database error in check_wrong_pin_entry: {e}")
+    except Exception as e:
+        logging.error(f"Error in check_wrong_pin_entry: {e}")
+    finally:
+        if conn:
+            conn.close()
+    return 0
 
 def fetch_crl_for_certificate(certificate):
     """
@@ -1000,10 +1078,16 @@ def register_token():
     if not slots:
         return jsonify({"error": "No tokens available"}), 404
     
+    if check_wrong_pin_entry(client_key_id_hex) >= 3:
+        message_prompt("3 Wrong PIN attempts. Please try again after 5 minutes.")
+        return jsonify({"error": "3 Wrong PIN attempts. Please try again after 5 minutes."}), 403
+    
     pin = prompt_for_pin()
     if not pin:
+        add_update_wrong_pin_entry(client_key_id_hex)
         message_prompt("Invalid PIN")
         return jsonify({"error": "Invalid PIN"}), 400
+    
     pkcsSession = None
     logged_in = True
     try:
@@ -1115,9 +1199,14 @@ def data_sign():
     slots = pkcs11.getSlotList(tokenPresent=True)
     if not slots:
         return jsonify({"error": "No tokens available"}), 404
+    
+    if check_wrong_pin_entry(key_id_hex) >= 3:
+        message_prompt("3 Wrong PIN attempts. Please try again after 5 minutes.")
+        return jsonify({"error": "3 Wrong PIN attempts. Please try again after 5 minutes."}), 403
 
     pin = prompt_for_pin()
     if not pin:
+        add_update_wrong_pin_entry(key_id_hex)
         message_prompt("Invalid PIN")
         return jsonify({"error": "Invalid PIN"}), 400
     
