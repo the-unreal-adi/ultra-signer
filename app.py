@@ -3,7 +3,8 @@ from flask_cors import CORS
 from cryptography import x509
 import PyKCS11
 from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.asymmetric import padding
 import sys
 from PyQt5 import QtWidgets, QtCore
 from multiprocessing import Pipe, Process
@@ -25,6 +26,7 @@ import os
 import signal
 import logging 
 import socket
+import binascii
 
 # Configure logging to write to a file
 logging.basicConfig(
@@ -136,6 +138,7 @@ def init_db():
                 key_id TEXT NOT NULL,
                 owner_name TEXT NOT NULL,
                 user_id TEXT NOT NULL,
+                client_ip TEXT NOT NULL,
                 nonce TEXT NOT NULL,
                 signature TEXT NOT NULL,
                 domain TEXT NOT NULL,
@@ -239,7 +242,7 @@ def init_client():
         if connection:
             connection.close()
 
-def store_registration_data(unique_id, key_id, owner_name, user_id, nonce, signature, domain, timestamp):
+def store_registration_data(unique_id, key_id, owner_name, user_id, client_ip, nonce, signature, domain, timestamp):
     """
     Store the verified registration data in the 'registered_tokens' SQLite database table.
     All fields except the ID are stored in Base64 format. The ID is derived from a hash of provided components.
@@ -253,9 +256,9 @@ def store_registration_data(unique_id, key_id, owner_name, user_id, nonce, signa
 
         # Insert the verified registration data
         cursor.execute('''
-            INSERT INTO registered_tokens (reg_id, key_id, owner_name, user_id, nonce, signature, domain, timestamp, is_verified)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (unique_id, key_id, owner_name, user_id, nonce, signature, domain, timestamp, "N"))
+            INSERT INTO registered_tokens (reg_id, key_id, owner_name, user_id, client_ip, nonce, signature, domain, timestamp, is_verified)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (unique_id, key_id, owner_name, user_id, client_ip, nonce, signature, domain, timestamp, "N"))
 
         conn.commit()  # Commit the transaction
     except sqlite3.Error as e:
@@ -278,7 +281,8 @@ def check_reg_status(reg_id, key_id, user_id, domain):
         result = cursor.fetchone()
 
         if result:
-            status = True 
+            if verify_registration_integrity(result[5], result[2], result[8], result[1], app.client_id, result[4], result[7], result[6]):
+                status = True 
     except sqlite3.Error as e:
         logging.error(f"Database error: {e}")
     finally:
@@ -639,6 +643,52 @@ def check_wrong_pin_entry(key_id):
         if conn:
             conn.close()
     return 0
+
+def verify_registration_integrity(nonce, owner_name, timestamp, key_id, client_id, client_ip, domain, user_id, signature_hex):
+    try:
+        pkcs11 = PyKCS11.PyKCS11Lib()
+        try:
+            pkcs11.load(load_token())
+        except:
+            raise ValueError("Failed to load PKCS#11 library. Please check the library path.")
+
+        slots = pkcs11.getSlotList(tokenPresent=True)
+        if not slots:
+            raise ValueError("No tokens available")
+        
+        pkcsSession=None
+        try:
+            pkcsSession = pkcs11.openSession(slots[0])
+
+            __, public_key_der, __, __ = fetch_certificate_publicKey_ownerName(pkcsSession)
+
+            public_key = serialization.load_der_public_key(public_key_der, backend=default_backend())
+        except:
+            raise ValueError("Error loading public key.")
+        
+        # Recreate the combined data that was signed
+        combined_data = (nonce + owner_name + timestamp + key_id + client_id + client_ip + domain + user_id).encode('utf-8')
+
+        # Decode the received signature from hex
+        signature = binascii.unhexlify(signature_hex)
+        
+        try:
+            public_key.verify(
+                signature,
+                combined_data,  # Hash of the data
+                padding=padding.PKCS1v15(),  # PKCS#1 v1.5 padding
+                algorithm=hashes.SHA256()  # Explicitly specify the hash algorithm
+            )
+        except:
+            raise ValueError("Signature verification failed.")
+        
+        return True
+    except Exception as e:
+        logging.error(f"Error verifying registration: {e}")
+        return False
+    finally:
+        if pkcsSession:
+            pkcsSession.closeSession()
 
 def fetch_crl_for_certificate(certificate):
     """
@@ -1114,7 +1164,7 @@ def register_token():
 
         clear_failed_registration()
         
-        store_registration_data(reg_id, key_id.hex(), owner_name, user_id, nonce, signature.hex(), domain, timestamp)
+        store_registration_data(reg_id, key_id.hex(), owner_name, user_id, client_ip, nonce, signature.hex(), domain, timestamp)
 
         return jsonify({"key_id":key_id.hex(), "signature": signature.hex(), "timestamp": timestamp, "client_mac": get_mac_address(), "client_id": app.client_id, "reg_id": reg_id})
     except Exception as e:
