@@ -23,6 +23,7 @@ from pystray import Icon, Menu, MenuItem
 from PIL import Image, ImageDraw
 import threading 
 import os
+import re
 import signal
 import logging 
 import socket
@@ -54,6 +55,29 @@ def fetch_domain_ip(domain):
     except (socket.error, socket.gaierror) as e:
         logging.error(f"Error resolving {domain}: {e}")
         return None
+
+def is_sql_safe(input_string: list) -> bool:
+    """
+    Checks if the input string contains potential SQL injection patterns.
+    Returns False if suspicious patterns are found, otherwise True.
+    """
+    # Common SQL injection patterns
+    sql_injection_patterns = [
+        r"(--|#|\/\*)",  # SQL comments
+        r"(\bUNION\b|\bSELECT\b|\bINSERT\b|\bUPDATE\b|\bDELETE\b)",  # SQL keywords
+        r"(\bDROP\b|\bALTER\b|\bTRUNCATE\b|\bEXEC\b|\bMERGE\b)",  # Destructive commands
+        r"(\bOR\b|\bAND\b).*=",  # Logical operations with assignments
+        r"(\bSLEEP\b|\bBENCHMARK\b)\s*\(.*\)",  # Time-based attacks
+        r"(['\";])\s*(OR|AND)\s+['\"0-9]",  # Common OR/AND injection patterns
+    ]
+    
+    for item in input_string:
+        for pattern in sql_injection_patterns:
+            if re.search(pattern, item, re.IGNORECASE):
+                logging.warning(f"Potential SQL injection detected in input: {item}")
+                return False  # Potential SQL injection detected
+    
+    return True  # Input is safe
 
 def get_mac_address():
     # Fetch the MAC address of the system
@@ -99,7 +123,7 @@ def get_client_id():
         logging.error(f"Error generating client ID: {str(e)}")
         raise  
 
-def generate_base64_id(components):
+def generate_base64_id(components: list) -> str:
     # Join the components into a single string
     combined_data = ''.join(components).encode('utf-8')
 
@@ -952,6 +976,9 @@ def manage_domain_mapping_prompt_in_process(conn):
         if domain:
             if domain.startswith('http://') or domain.startswith('https://'):
                 domain = domain.split('/')[2].split(':')[0]
+            if not is_sql_safe([domain]):
+                message_prompt("Invalid domain name.")
+                return
             result = add_domain_mapping(domain)
             if result == 1:
                 refresh_domain_list()
@@ -1046,6 +1073,9 @@ def list_tokens():
 
     if not all([user_id, domain]):
         return jsonify({"error": "Insufficient parameters for token listing."}), 400
+    
+    if not is_sql_safe([user_id, domain]):
+        return jsonify({"error": "Invalid parameters."}), 400
 
     if not check_domain_mapping(domain):
         return jsonify({"error": "Domain mapping not found"}), 410
@@ -1079,9 +1109,18 @@ def list_tokens():
 def delete_junk_reg():
     try:
         reg_id = request.json.get("reg_id")
+        domain = request.json.get("domain")
 
-        if reg_id:
-            clear_junk_registration(reg_id)
+        if not all([reg_id, domain]):
+            return jsonify({"error": "Insufficient parameters for token listing."}), 400
+        
+        if not is_sql_safe([reg_id, domain]):
+            return jsonify({"error": "Invalid parameters."}), 400
+
+        if not check_domain_mapping(domain):
+            return jsonify({"error": "Domain mapping not found"}), 410
+
+        clear_junk_registration(reg_id)
 
         return jsonify({"status": "success"}), 200
     except Exception as e:
@@ -1096,8 +1135,11 @@ def register_token():
     client_ip = request.json.get("client_ip")
     domain = request.json.get("domain")
     
-    if not all([client_cert_hex, nonce, client_key_id_hex, client_ip, domain]):
+    if not all([client_cert_hex, nonce, client_key_id_hex, user_id, client_ip, domain]):
         return jsonify({"error": "Insufficient parameters for token registration."}), 400
+    
+    if not is_sql_safe([client_cert_hex, nonce, client_key_id_hex, user_id, client_ip, domain]):
+        return jsonify({"error": "Invalid parameters."}), 400
 
     if not check_domain_mapping(domain):
         return jsonify({"error": "Domain mapping not found"}), 410
@@ -1179,6 +1221,16 @@ def register_token():
 def verify_registration():
     try:
         reg_id = request.json.get("reg_id")
+        domain = request.json.get("domain")
+
+        if not all([reg_id, domain]):
+            return jsonify({"error": "Insufficient parameters for token listing."}), 400
+        
+        if not is_sql_safe([reg_id, domain]):
+            return jsonify({"error": "Invalid parameters."}), 400
+
+        if not check_domain_mapping(domain):
+            return jsonify({"error": "Domain mapping not found"}), 410
 
         update_registration_status(reg_id)
 
@@ -1198,6 +1250,9 @@ def data_sign():
     # Validate that we have the required data
     if not all([reg_id, key_id_hex, digests, user_id, domain]):
         return jsonify({"error": "Missing required fields."}), 400
+    
+    if not is_sql_safe([reg_id, key_id_hex, user_id, domain]):
+        return jsonify({"error": "Invalid parameters."}), 400
 
     if not check_domain_mapping(domain):
         return jsonify({"error": "Domain mapping not found"}), 410
