@@ -305,8 +305,10 @@ def check_reg_status(reg_id, key_id, user_id, domain):
         result = cursor.fetchone()
 
         if result:
-            if verify_registration_integrity(result[5], result[2], result[8], result[1], app.client_id, result[4], result[7], result[6]):
+            if verify_registration_integrity(result[5], result[2], result[8], result[1], app.client_id, result[4], result[7], result[3], result[6]):
                 status = True 
+            else:
+                clear_failed_registration(reg_id)
     except sqlite3.Error as e:
         logging.error(f"Database error: {e}")
     finally:
@@ -397,11 +399,14 @@ def get_dsc_reg_id(key_id, user_id, domain):
         conn = sqlite3.connect('signerData.db')  # Connect to SQLite database
         cursor = conn.cursor()
 
-        cursor.execute("SELECT reg_id FROM registered_tokens WHERE key_id = ? AND user_id = ? And domain = ? AND is_verified = 'Y'", (key_id, user_id, domain,))
+        cursor.execute("SELECT * FROM registered_tokens WHERE key_id = ? AND user_id = ? And domain = ? AND is_verified = 'Y'", (key_id, user_id, domain,))
         result = cursor.fetchone()
          
         if result:
-            reg_id = str(result[0])
+            if verify_registration_integrity(result[5], result[2], result[8], result[1], app.client_id, result[4], result[7], result[3], result[6]):
+                reg_id = str(result[0])
+            else:
+                clear_junk_registration(result[0])
     except sqlite3.Error as e:
         logging.error(f"Database error: {e}")
     finally:
@@ -667,6 +672,31 @@ def check_wrong_pin_entry(key_id):
         if conn:
             conn.close()
     return 0
+
+def clear_wrong_pin_entry(key_id):
+    try:
+        conn = sqlite3.connect('signerData.db')  # Connect to SQLite database
+        cursor = conn.cursor()
+
+        conn.execute("BEGIN")
+
+        cursor.execute('''
+            DELETE FROM wrong_pin_entry
+            WHERE key_id = ?
+        ''', (key_id,))
+
+        conn.commit()
+    except sqlite3.Error as e:
+        if conn:
+            conn.rollback()
+        logging.error(f"Database error in clear_wrong_pin_entry: {e}")
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        logging.error(f"Error in clear_wrong_pin_entry: {e}")
+    finally:
+        if conn:
+            conn.close()
 
 def verify_registration_integrity(nonce, owner_name, timestamp, key_id, client_id, client_ip, domain, user_id, signature_hex):
     try:
@@ -1160,8 +1190,8 @@ def register_token():
         return jsonify({"error": "No tokens available"}), 404
     
     if check_wrong_pin_entry(client_key_id_hex) >= 3:
-        message_prompt("3 Wrong PIN attempts. Please try again after 5 minutes.")
-        return jsonify({"error": "3 Wrong PIN attempts. Please try again after 5 minutes."}), 403
+        message_prompt("Too many wrong PIN attempts. Please try again after sometime.")
+        return jsonify({"error": "Too many wrong PIN attempts. Please try again after sometime."}), 403
     
     pin = prompt_for_pin()
     if not pin:
@@ -1178,7 +1208,9 @@ def register_token():
 
         try:
             pkcsSession.login(pin)
+            clear_wrong_pin_entry(client_key_id_hex)
         except PyKCS11.PyKCS11Error:
+            add_update_wrong_pin_entry(client_key_id_hex)
             logged_in = False
             message_prompt("Invalid PIN")
             return jsonify({"error": "Invalid PIN"}), 403
@@ -1295,8 +1327,8 @@ def data_sign():
         return jsonify({"error": "No tokens available"}), 404
     
     if check_wrong_pin_entry(key_id_hex) >= 3:
-        message_prompt("3 Wrong PIN attempts. Please try again after 5 minutes.")
-        return jsonify({"error": "3 Wrong PIN attempts. Please try again after 5 minutes."}), 403
+        message_prompt("Too many wrong PIN attempts. Please try again after sometime.")
+        return jsonify({"error": "Too many wrong PIN attempts. Please try again after sometime."}), 403
 
     pin = prompt_for_pin()
     if not pin:
@@ -1313,7 +1345,9 @@ def data_sign():
 
         try:
             pkcsSession.login(pin)
+            clear_wrong_pin_entry(key_id_hex)
         except PyKCS11.PyKCS11Error:
+            add_update_wrong_pin_entry(key_id_hex)
             logged_in = False
             message_prompt("Invalid PIN")
             return jsonify({"error": "Invalid PIN"}), 403
