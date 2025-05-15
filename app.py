@@ -714,7 +714,7 @@ def verify_registration_integrity(nonce, owner_name, timestamp, key_id, client_i
         try:
             pkcsSession = pkcs11.openSession(slots[0])
 
-            __, public_key_der, __, __ = fetch_certificate_publicKey_ownerName(pkcsSession)
+            __, public_key_der, __, __, __, __, __, __ = fetch_certificate_publicKey_ownerName(pkcsSession)
 
             public_key = serialization.load_der_public_key(public_key_der, backend=default_backend())
         except:
@@ -885,7 +885,12 @@ def fetch_certificate_publicKey_ownerName(pkcsSession):
     if not key_id:
         key_id = hashlib.sha1(str(public_key_der.hex()).encode('utf-8')).digest()
 
-    return cert_der, public_key_der, owner_name, key_id
+    issue_date = certificate.not_valid_before
+    expiry_date = certificate.not_valid_after
+    subject = certificate.subject.rfc4514_string()
+    key_issuer_display_name = certificate.issuer.rfc4514_string()
+
+    return cert_der, public_key_der, owner_name, key_id, issue_date, expiry_date, subject, key_issuer_display_name
 
 def prompt_for_pin_in_process(conn):
     app = QtWidgets.QApplication(sys.argv)
@@ -1124,11 +1129,11 @@ def list_tokens():
     try:
         pkcsSession = pkcs11.openSession(slots[0])
 
-        cert_der, public_key, owner_name, key_id = fetch_certificate_publicKey_ownerName(pkcsSession)
+        cert_der, public_key, owner_name, key_id, issue_date, expiry_date, subject, key_issuer_display_name = fetch_certificate_publicKey_ownerName(pkcsSession)
         
         reg_id = get_dsc_reg_id(key_id.hex(), user_id, domain)
 
-        return jsonify({"certficate":cert_der.hex(), "public_key":public_key.hex(), "owner_name":owner_name, "key_id":key_id.hex(), "client_id": app.client_id, "reg_id": reg_id})
+        return jsonify({"certficate":cert_der.hex(), "public_key":public_key.hex(), "owner_name":owner_name, "key_id":key_id.hex(), "client_id": app.client_id, "reg_id": reg_id,"issue_date":issue_date,"expiry_date":expiry_date,"subject":subject,"key_issuer_display_name":key_issuer_display_name})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
     finally:
@@ -1204,7 +1209,7 @@ def register_token():
     try:
         pkcsSession = pkcs11.openSession(slots[0])
         
-        cert_der, public_key, owner_name, key_id = fetch_certificate_publicKey_ownerName(pkcsSession)
+        cert_der, public_key, owner_name, key_id, issue_date, expiry_date, subject, key_issuer_display_name = fetch_certificate_publicKey_ownerName(pkcsSession)
 
         try:
             pkcsSession.login(pin)
@@ -1341,7 +1346,7 @@ def data_sign():
     try:
         pkcsSession = pkcs11.openSession(slots[0])
 
-        cert_der, public_key, owner_name, key_id = fetch_certificate_publicKey_ownerName(pkcsSession)
+        cert_der, public_key, owner_name, key_id, issue_date, expiry_date, subject, key_issuer_display_name = fetch_certificate_publicKey_ownerName(pkcsSession)
 
         try:
             pkcsSession.login(pin)
